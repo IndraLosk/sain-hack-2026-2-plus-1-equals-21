@@ -1,0 +1,43 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: sain_case4_db
+    environment:
+      POSTGRES_USER: sain
+      POSTGRES_PASSWORD: sain
+      POSTGRES_DB: sain_case4
+    ports:
+      - "5434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sain -d sain_case4"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build: .
+    container_name: sain_case4_app
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PG_HOST: db
+      PG_PORT: "5432"
+      PG_USER: sain
+      PG_PASSWORD: sain
+      PG_DB: sain_case4
+    # Переопределяем CMD из Dockerfile: сначала заливаем dev-набор через main,
+    # затем поднимаем сервер. При перезапуске контейнера повторно не сидим.
+    command: >
+      sh -c "python main.py seed --json /data/case4-dev.json &&
+             python main.py serve --host 0.0.0.0 --port 8000"
+    volumes:
+      - ./case4-dev.json:/data/case4-dev.json:ro
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
