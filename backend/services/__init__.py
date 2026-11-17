@@ -1,23 +1,13 @@
 """Сервисный слой: бизнес-логика приложения.
 
-Собирает обработчики данных и health-проверку. Используется роутами через
-этот пакет. Не зависит от HTTP-части.
+Собирает обработчики и используется роутами через этот пакет.
+Набор агенту даёт клиент через getData; БД в серверной части не участвует.
 """
 
 from .services import (
-    check_health,
-    stats,
-    list_experts,
-    list_articles,
-    list_requests,
     run_case,
 )
 
 __all__ = [
-    "check_health",
-    "stats",
-    "list_experts",
-    "list_articles",
-    "list_requests",
     "run_case",
 ]
