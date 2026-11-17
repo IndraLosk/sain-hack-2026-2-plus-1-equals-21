@@ -1,70 +1,35 @@
-# ---------------------------------------------------------------------------
-# Пуш на GitHub только приложения.
-# В репозиторий попадают: app/, config/, web/, scripts/, requirements.txt,
-# run.sh, check_agent.py, README.md, env.example, data/case4-dev.json
-# ---------------------------------------------------------------------------
-
-# --- виртуальное окружение и кэши Python ---
-*.pyc
-.venv/
-venv/
-env/
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
-build/
-dist/
 *.egg-info/
 .eggs/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.ipynb_checkpoints/
-
-# --- секреты и локальные настройки ---
+build/
+dist/
+.venv/
+venv/
+env/
 .env
 .env.*
 !.env.example
-*.pem
-*.key
 
-# --- сгенерированные данные (пересоздаются при первом старте) ---
-data/chroma/
-data/checkpoints.sqlite
-data/checkpoints.sqlite-journal
-data/checkpoints.sqlite-wal
-data/checkpoints.sqlite-shm
-*.sqlite
-*.sqlite3
-*.db
-*.bin
-*.pickle
+# Тесты и линтеры
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
-# --- кэши моделей / HuggingFace / Ollama ---
-.cache/
-models/
-*.gguf
-*.safetensors
-
-# --- материалы хакатона (не часть приложения) ---
-*.pdf
-a1.md
-_r.py
-.gena-ai/
-
-# --- логи и временные файлы ---
-*.log
-logs/
-tmp/
-*.tmp
-*.bak
-*.swp
-.DS_Store
-Thumbs.db
+# IDE
 .idea/
 .vscode/
+*.swp
+*.swo
 
-# --- старый файл-заготовка gitignore ---
-gitignore.txt
+# OS
+.DS_Store
+Thumbs.db
+
+# Данные/артефакты (держать большие выгрузки вне git)
+*.xlsx
+*.csv.tmp
