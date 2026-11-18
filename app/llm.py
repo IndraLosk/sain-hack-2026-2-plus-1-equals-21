@@ -1,4 +1,10 @@
-"""Обёртки над локальными LLM (Ollama, qwen2.5:7b) и guardrail-логика."""
+"""Обёртки над удалённой LLM (OpenAI-совместимый прокси) и guardrail-логика.
+
+LLM доступна только через прокси сервиса (OpenAI-совместимый API): адрес, ключ
+и модель в env LLM_BASE_URL / LLM_API_KEY / LLM_MODEL. Пакет `openai` объявлен
+в requirements.txt, но НЕ устанавливается автоматически: без него приложение
+работает в режиме эвристического guardrail (см. llm_guardrail).
+"""
 from __future__ import annotations
 
 import asyncio
@@ -16,46 +22,42 @@ logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
-# Ollama
+# OpenAI-совместимый клиент
 # --------------------------------------------------------------------------- #
-class OllamaLLM:
-    """Минимальный асинхронный клиент Ollama: chat (stream / non-stream) + JSON-режим."""
+class OpenAIClient:
+    """Асинхронный клиент OpenAI-совместимого прокси: chat/stream + JSON-режим.
+
+    Пакет `openai` подключается лениво: если он не установлен, health() вернёт
+    ok=False с пояснением, а guardrail продолжит работать на эвристике.
+    """
 
     def __init__(self, model: str | None = None, base_url: str | None = None) -> None:
         settings = get_settings()
         self.model = model or settings.llm_model
-        self.base_url = (base_url or settings.ollama_base_url).rstrip("/")
+        self.base_url = (base_url or settings.llm_base_url).rstrip("/")
+        self.api_key = settings.resolved_llm_api_key
         self.temperature = settings.llm_temperature
-        self.num_ctx = settings.llm_num_ctx
+        self.max_tokens = settings.llm_num_ctx or 8192
         self.timeout = settings.llm_request_timeout
 
-    # ------------------------------------------------------------------ #
-    def _payload(
-        self,
-        messages: List[Dict[str, str]],
-        *,
-        stream: bool,
-        temperature: float | None = None,
-        json_mode: bool = False,
-        num_predict: int | None = None,
-    ) -> Dict[str, Any]:
-        options: Dict[str, Any] = {
-            "temperature": self.temperature if temperature is None else temperature,
-            "num_ctx": self.num_ctx,
-            "top_p": 0.9,
-            "repeat_penalty": 1.05,
-        }
-        if num_predict is not None:
-            options["num_predict"] = num_predict
-        payload: Dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "stream": stream,
-            "options": options,
-        }
-        if json_mode:
-            payload["format"] = "json"
-        return payload
+    # Инициализация настоящего клиента — лениво, чтобы не падал импорт.
+    def _client(self) -> Any:
+        try:
+            from openai import AsyncOpenAI
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(
+                "Библиотека 'openai' не установлена. Установите зависимости: "
+                "pip install openai  (см. requirements.txt)"
+            ) from exc
+        return AsyncOpenAI(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            timeout=self.timeout,
+        )
+
+    def _max_or_none(self, num_predict: int | None) -> int | None:
+        # открытые прокси часто ограничены; по умолчанию используем llm_num_ctx
+        return num_predict if num_predict is not None else self.max_tokens
 
     async def chat(
         self,
@@ -65,14 +67,23 @@ class OllamaLLM:
         json_mode: bool = False,
         num_predict: int | None = None,
     ) -> str:
-        payload = self._payload(
-            messages, stream=False, temperature=temperature, json_mode=json_mode, num_predict=num_predict
-        )
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.post(f"{self.base_url}/api/chat", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-        return str((data.get("message") or {}).get("content") or "")
+        client = self._client()
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature if temperature is None else temperature,
+            "max_tokens": self._max_or_none(num_predict),
+            "stream": False,
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        try:
+            resp = await client.chat.completions.create(**kwargs)
+        finally:
+            await client.close()
+        if not resp.choices:
+            return ""
+        return str((resp.choices[0].message or {}).content or "")
 
     async def stream_chat(
         self,
@@ -81,43 +92,50 @@ class OllamaLLM:
         temperature: float | None = None,
         num_predict: int | None = None,
     ) -> AsyncIterator[str]:
-        payload = self._payload(messages, stream=True, temperature=temperature, num_predict=num_predict)
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            async with client.stream("POST", f"{self.base_url}/api/chat", json=payload) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line:
-                        continue
-                    try:
-                        chunk = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if chunk.get("error"):
-                        raise RuntimeError(str(chunk["error"]))
-                    piece = (chunk.get("message") or {}).get("content") or ""
-                    if piece:
-                        yield piece
-                    if chunk.get("done"):
-                        break
+        client = self._client()
+        try:
+            stream = await client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=self.temperature if temperature is None else temperature,
+                max_tokens=self._max_or_none(num_predict),
+                stream=True,
+            )
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                piece = (chunk.choices[0].delta or {}).content
+                if piece:
+                    yield piece
+        finally:
+            await client.close()
 
     async def health(self) -> Dict[str, Any]:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"{self.base_url}/api/tags")
-                resp.raise_for_status()
-                names = [m.get("name") for m in resp.json().get("models", [])]
-            return {"ok": True, "models": names, "model_available": self.model in names}
+            client = self._client()
+            # не-деструктивно проверяем простым запросом моделей (прокси OpenAI)
+            try:
+                models = await client.models.list()
+                names = [m.id for m in models.data]
+                ok = True
+            except Exception as exc:  # прокси может не отдавать /models
+                logger.debug("models.list недоступен: %s", exc)
+                names = []
+                ok = True  # сам прокси доступен, если не бросил на подключение
+            finally:
+                await client.close()
+            return {"ok": ok, "models": names, "model_available": self.model in names}
         except Exception as exc:  # pragma: no cover
             return {"ok": False, "error": str(exc), "model_available": False}
 
 
-_llm: Optional[OllamaLLM] = None
+_llm: Optional[OpenAIClient] = None
 
 
-def get_llm() -> OllamaLLM:
+def get_llm() -> OpenAIClient:
     global _llm
     if _llm is None:
-        _llm = OllamaLLM()
+        _llm = OpenAIClient()
     return _llm
 
 
@@ -226,8 +244,8 @@ def _parse_safety_json(raw: str) -> Optional[SafetyCheckSchema]:
         return None
 
 
-async def llm_guardrail(text: str, llm: OllamaLLM | None = None) -> GuardrailResult:
-    """LLM-проверка с with_structured_output(json_mode) + fallback на эвристику."""
+async def llm_guardrail(text: str, llm: OpenAIClient | None = None) -> GuardrailResult:
+    """LLM-проверка с json-режимом + fallback на эвристику."""
     heuristic = heuristic_guardrail(text)
     llm = llm or get_llm()
     messages = [
@@ -267,4 +285,4 @@ async def llm_guardrail_async(text: str) -> GuardrailResult:
     return await asyncio.wait_for(llm_guardrail(text), timeout=get_settings().llm_request_timeout)
 
 
-__all__ = ["OllamaLLM", "get_llm", "heuristic_guardrail", "llm_guardrail", "llm_guardrail_async"]
+__all__ = ["OpenAIClient", "get_llm", "heuristic_guardrail", "llm_guardrail", "llm_guardrail_async"]

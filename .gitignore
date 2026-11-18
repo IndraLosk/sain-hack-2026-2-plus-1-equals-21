@@ -33,3 +33,24 @@ Thumbs.db
 # Данные/артефакты (держать большие выгрузки вне git)
 *.xlsx
 *.csv.tmp
+
+# Локальные данные приложения (генерируются при первом старте)
+data/chroma/
+data/checkpoints.sqlite
+data/*.sqlite*
+*.whl
+
+# Логи
+*.log
+logs/
+tmp/
+
+# Ключи и токены (НЕ коммитить)
+*.key
+*.pem
+*.token
+api.token
+llm.key
+id_ed25519
+known_hosts
+!env.example

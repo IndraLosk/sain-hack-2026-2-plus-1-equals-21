@@ -1,3 +1,12 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 httpx==0.28.1
+pydantic==2.10.4
+pydantic-settings==2.7.0
+langgraph>=0.2.0
+# SQLite-память диалогов (AsyncSqliteSaver): в langgraph 1.x вынесен отдельно
+langgraph-checkpoint-sqlite>=1.0.0
+langchain-core>=0.3.0
+chromadb>=0.5.0
+# LLM через OpenAI-совместимый прокси (LLM_BASE_URL/LLM_API_KEY/LLM_MODEL)
+openai>=1.40.0

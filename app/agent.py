@@ -103,7 +103,7 @@ CATEGORY_HUMAN = {
 # Утилиты
 # --------------------------------------------------------------------------- #
 def _history_messages(messages: list, limit: int = 8) -> List[Dict[str, str]]:
-    """Последние реплики диалога в формате Ollama (без системного промпта)."""
+    """Последние реплики диалога в формате сообщений чата (без системного промпта)."""
     out: List[Dict[str, str]] = []
     for msg in messages[-limit:]:
         role = getattr(msg, "type", None) or (msg.get("role") if isinstance(msg, dict) else None)

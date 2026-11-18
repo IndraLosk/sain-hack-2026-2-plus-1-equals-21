@@ -18,14 +18,18 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=str(BASE_DIR / ".env"), env_file_encoding="utf-8", extra="ignore")
 
-    # --- локальные LLM ---
-    ollama_base_url: str = "http://127.0.0.1:11434"
-    llm_model: str = "qwen2.5:7b"
+    # --- LLM (OpenAI-совместимый прокси; на стенде задаётся организаторами) ---
+    llm_base_url: str = "https://bifrost.be-healthy.tech/v1"
+    llm_api_key: str = ""  # заполняется из env LLM_API_KEY или файла llm.key (см. ниже)
+    llm_model: str = "gpt-6-luna"
     llm_temperature: float = 0.3
     llm_num_ctx: int = 8192
     llm_request_timeout: float = 300.0
     # модель для guardrail (можно оставить той же)
-    guard_model: str = "qwen2.5:7b"
+    guard_model: str = "gpt-6-luna"
+
+    # Файл ключа LLM (локальная разработка) — по аналогии с api.token
+    llm_key_file: str = str(BASE_DIR / "llm.key")
 
     # --- эмбеддинги / chroma ---
     embedding_model: str = "BAAI/bge-m3"
@@ -52,6 +56,24 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> List[str]:
         raw = (self.cors_origins or "*").strip()
         return ["*"] if raw == "*" else [o.strip() for o in raw.split(",") if o.strip()]
+
+    @property
+    def resolved_llm_api_key(self) -> str:
+        """Ключ LLM: env LLM_API_KEY → файл llm.key → пусто (guardrail уйдёт в эвристику)."""
+        if self.llm_api_key:
+            return self.llm_api_key
+        key = os.environ.get("LLM_API_KEY", "").strip()
+        if key:
+            return key
+        try:
+            if os.path.exists(self.llm_key_file):
+                with open(self.llm_key_file, encoding="utf-8") as fh:
+                    k = fh.read().strip()
+                if k:
+                    return k
+        except OSError:
+            pass
+        return ""
 
 
 @lru_cache(maxsize=1)

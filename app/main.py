@@ -104,7 +104,9 @@ async def lifespan(app: FastAPI):
     catalog = get_catalog()  # валидация конфига при старте
     logger.info("catalog loaded: %d programs, %d experts", len(catalog.programs), len(catalog.experts))
     await asyncio.to_thread(get_store)  # инициализация Chroma
-    await seed_if_empty()
+    # временно отключено: seed грузит torch/sentence-transformers (bge-m3),
+    # что на локальной/стендовой машине вешает старт (см. get_embedder)
+    # await seed_if_empty()
     await get_runtime().startup()
     yield
     await get_runtime().shutdown()
@@ -112,7 +114,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Эксперт как плейлист",
-    description="AI-платформа научно обоснованных программ здоровья (LangGraph + Chroma + Ollama qwen2.5:7b)",
+    description="AI-платформа научно обоснованных программ здоровья (LangGraph + Chroma + OpenAI-совместимый LLM)",
     version="1.0.0",
     lifespan=lifespan,
 )
