@@ -14,7 +14,6 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
 
 from .agent import NO_EVIDENCE_PHRASE, get_runtime
 from .config import BASE_DIR, get_catalog, get_settings
@@ -399,18 +398,18 @@ async def _fetch_dataset(request: Request, dataset_code: Optional[str]) -> Optio
 
 
 # --------------------------------------------------------------------------- #
-# Статика фронтенда (если собран; иначе — встроенный демо-UI)
+# Корневой путь: фронтенд и JSON-ответ для стенда (/health)
 # --------------------------------------------------------------------------- #
-_dist = BASE_DIR / "web" / "dist"
-if _dist.exists():
-    app.mount("/", StaticFiles(directory=str(_dist), html=True), name="web")
-else:
-
-    @app.get("/", include_in_schema=False)
-    async def index() -> Any:
-        page = BASE_DIR / "web" / "index.html"
-        if not page.exists():
-            return JSONResponse({"service": "expert-as-playlist", "docs": "/docs"})
+@app.get("/", include_in_schema=False)
+async def index() -> Any:
+    page = BASE_DIR / "web" / "index.html"
+    if page.exists():
         from fastapi.responses import HTMLResponse
 
         return HTMLResponse(page.read_text(encoding="utf-8"))
+    return {"team": "team2", "name": "2 + 1 = 21", "status": "ok"}
+
+
+@app.get("/health", include_in_schema=False)
+async def health_status() -> Any:
+    return {"team": "team2", "name": "2 + 1 = 21", "status": "ok"}

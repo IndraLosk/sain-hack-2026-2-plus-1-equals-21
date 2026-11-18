@@ -54,3 +54,7 @@ llm.key
 id_ed25519
 known_hosts
 !env.example
+# Фронтенд (локально; в git не попадает — стенду не нужен)
+web/
+
+check.sh
