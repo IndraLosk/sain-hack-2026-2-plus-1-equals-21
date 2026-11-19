@@ -21,12 +21,12 @@ PORT="${PORT:-8000}"
 HOST="${HOST:-127.0.0.1}"
 
 # --- 1. Python-окружение -----------------------------------------------------
-if [ ! -d .venv ]; then
-  echo "→ создаю .venv и ставлю зависимости бэкенда"
-  python3.11 -m venv .venv 2>/dev/null || python3 -m venv .venv
-  .venv/bin/python -m pip install --upgrade pip >/dev/null
-  .venv/bin/python -m pip install -r requirements.txt
-fi
+#if [ ! -d .venv ]; then
+#  echo "→ создаю .venv и ставлю зависимости бэкенда"
+#  python3.11 -m venv .venv 2>/dev/null || python3 -m venv .venv
+#  .venv/bin/python -m pip install --upgrade pip >/dev/null
+#  .venv/bin/python -m pip install -r requirements.txt
+#fi
 
 # --- 2. Конфигурация ---------------------------------------------------------
 if [ ! -f .env ]; then
@@ -46,4 +46,4 @@ fi
 
 # --- 4. Запуск ---------------------------------------------------------------
 echo "→ http://${HOST}:${PORT}  (Swagger: /docs)"
-exec .venv/bin/python -m uvicorn backend.main:app --host "$HOST" --port "$PORT" --reload
+exec python3 -m uvicorn backend.main:app --host "$HOST" --port "$PORT" --reload
