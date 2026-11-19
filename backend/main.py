@@ -648,17 +648,23 @@ async def run_case4(request: Request) -> JSONResponse:
     except Exception:  # noqa: BLE001
         raise HTTPException(status_code=400, detail="body must be valid JSON")
 
+    # Как отличить «стендовый» вызов от локальной отладки:
+    #  * стенд всегда шлёт {"case":4, "dataset_code": "..."} → берём записи из набора по dataset_code;
+    #  * если dataset_code нет — используем записи прямо из тела (это локальная проверка, список записей).
     if isinstance(body, dict):
         dataset_code = str(body.get("dataset_code") or "").strip() or None
     else:
         dataset_code = None
 
-    token = _authorization_bearer(request)
-
-    dataset = await fetch_dataset(token=token or None, dataset_code=dataset_code)
-    records = [r for r in (dataset or {}).get("requests") or [] if isinstance(r, dict)]
-    if not records:
-        # фолбэк для локальной отладки: тело может прийти списком записей
+    # Записи, которые надо обработать. dataset_code есть → источник — набор API/локальной копии.
+    records: List[Dict[str, Any]] = []
+    if dataset_code:
+        token = _authorization_bearer(request)
+        dataset = await fetch_dataset(token=token or None, dataset_code=dataset_code)
+        records = [r for r in (dataset or {}).get("requests") or [] if isinstance(r, dict)]
+    else:
+        # Локальная отладка: обрабатываем ровно то, что пришло в теле (1 запись = 1 вызов LLM).
+        token = _authorization_bearer(request)
         if isinstance(body, list):
             records = [r for r in body if isinstance(r, dict)]
         elif isinstance(body, dict):
