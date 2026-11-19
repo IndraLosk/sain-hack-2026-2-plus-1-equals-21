@@ -1,0 +1,77 @@
+@import './spotify-theme.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900 antialiased;
+}
+
+/* Аккуратный скролл в ленте сообщений */
+.chat-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 6px;
+}
+.chat-scroll::-webkit-scrollbar-thumb {
+  @apply rounded-full bg-slate-300;
+}
+.chat-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Плавное появление сообщений */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.msg-in {
+  animation: fade-up 0.18s ease-out;
+}
+
+/* Мигающий курсор стриминга */
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.15;
+  }
+}
+.caret {
+  animation: blink 1s steps(2, start) infinite;
+}
+
+/* Пульсирующие точки «ищу в статьях…» */
+@keyframes dot-pulse {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.85);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.dot {
+  animation: dot-pulse 1.2s ease-in-out infinite;
+}
