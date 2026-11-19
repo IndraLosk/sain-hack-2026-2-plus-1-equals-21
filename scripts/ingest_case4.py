@@ -1,11 +1,11 @@
 """Загрузка доказательной базы из датасета кейса 4 (data/case4-dev.json).
 
 Единственный источник научных статей приложения — датасет `data/case4-dev.json`
-(20 статей, CC BY). Демо-статьи удалены.
+(20 статей, CC BY).
 
 Запуск:
-    .venv/bin/python scripts/ingest_case4.py            # пересобрать базу с нуля
-    .venv/bin/python scripts/ingest_case4.py --keep     # досинхронизировать без очистки
+    python scripts/ingest_case4.py            # пересобрать базу с нуля
+    python scripts/ingest_case4.py --keep     # досинхронизировать без очистки
 """
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.config import get_settings  # noqa: E402
-from app.vectorstore import add_article_async, get_store  # noqa: E402
+from backend.config import get_settings, get_catalog  # noqa: E402
+from backend.vectorstore import add_article_async, get_store  # noqa: E402
 
 
 def load_dataset(path: Path) -> dict:
@@ -57,7 +57,6 @@ def build_kwargs(article: dict, program_id: str) -> dict:
         "content": "\n\n".join(s["text"] for s in sections),
         "article_id": str(article.get("article_id")),
         "sections": sections,
-        "added_at": None,  # None → время индексации (статьи считаются свежими для бейджа NEW)
         "extra_metadata": {
             "authors": ", ".join(article.get("authors") or []),
             "doi": article.get("doi"),
@@ -91,8 +90,6 @@ async def main(reset: bool) -> int:
     if reset:
         print(f"reset collection {store.collection_name} ({store.count()} chunks)")
         await asyncio.to_thread(store.reset)
-
-    from app.config import get_catalog
 
     program_ids = [p.id for p in get_catalog().programs]
 

@@ -1,61 +1,54 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-.eggs/
-build/
-dist/
+# ---------------------------------------------------------------------------
+# В репозиторий попадает только приложение:
+#   backend/ (FastAPI + LangGraph + Chroma + ONNX), frontend/ (React + TS + Tailwind),
+#   config/, data/case4-dev.json, requirements.txt, run.sh, env.example
+# ---------------------------------------------------------------------------
+
+# --- виртуальное окружение и кэши Python ---
 .venv/
 venv/
 env/
-.env
-.env.*
-!.env.example
-
-# Тесты и линтеры
+__pycache__/
+*.py[cod]
+.Python
+build/
+*.egg-info/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.coverage
-htmlcov/
 
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
+# --- секреты и локальные настройки ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
 
-# OS
-.DS_Store
-Thumbs.db
+# --- фронтенд ---
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
 
-# Данные/артефакты (держать большие выгрузки вне git)
-*.xlsx
-*.csv.tmp
-
-# Локальные данные приложения (генерируются при первом старте)
+# --- сгенерированные данные (пересоздаются при первом старте) ---
 data/chroma/
-data/checkpoints.sqlite
-data/*.sqlite*
-*.whl
+data/models/
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-wal
+*.sqlite-shm
 
-# Логи
+# --- служебные каталоги инструментов (не часть приложения) ---
+.gena-ai/
+
+# --- логи и временные файлы ---
 *.log
 logs/
 tmp/
-
-# Ключи и токены (НЕ коммитить)
-*.key
-*.pem
-*.token
-api.token
-llm.key
-id_ed25519
-known_hosts
-!env.example
-# Фронтенд (локально; в git не попадает — стенду не нужен)
-web/
-
-check.sh
-check_remote.sh
+*.tmp
+*.bak
+*.swp
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
