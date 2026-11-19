@@ -371,42 +371,10 @@ def _heuristic_translate(text: str) -> str:
 async def translate_query_for_retrieval(question: str) -> str:
     """Переводит русский запрос на английские ключевые слова для поиска по англ. статьям.
 
-    Пытаемся через LLM один раз; при недоступности — эвристический перевод по словарю.
+    Только эвристический перевод по доменному словарю — БЕЗ LLM-вызова, чтобы не тратить
+    токены на каждый запрос (на проверке это сотни лишних обращений к прокси).
     Возвращает строку для BM25 или пустую строку (тогда ретривер ведёт себя как раньше).
     """
-    if not question or not question.strip():
-        return ""
-    # Быстрый путь: если в запросе уже есть латинские слова — используем их как есть.
-    import re as _re
-    latin = _re.findall(r"[a-zA-Z]{2,}", question)
-    if latin and len(" ".join(latin)) > 6:
-        return " ".join(latin)
-    try:
-        from .llm import get_llm
-        raw = await asyncio.wait_for(
-            get_llm().chat(
-                [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Ты переводишь краткий вопрос пользователя о сне и здоровье на набор английских "
-                            "ключевых слов для поиска по англоязычным научным статьям. Верни ТОЛЬКО английские "
-                            "ключевые слова, разделённые пробелом, без знаков препинания и без пояснений. "
-                            "Пример: «сколько мелатонина пить чтобы уснуть» -> melatonin dose insomnia fall asleep"
-                        ),
-                    },
-                    {"role": "user", "content": (question or "")[:500]},
-                ],
-                temperature=0.0,
-                num_predict=80,
-            ),
-            timeout=15.0,
-        )
-        cleaned = _re.sub(r"[^a-zA-Z ]+", " ", (raw or "")).strip()
-        if cleaned:
-            return " ".join(cleaned.split())[:300]
-    except Exception as exc:  # noqa: BLE001 — модель недоступна или сбой
-        logger.warning("query translation via LLM failed, heuristic fallback: %s", exc)
     return _heuristic_translate(question)
 
 
@@ -639,7 +607,8 @@ class AgentRuntime:
             state.get("retrieved_docs") or [], query=message, session_id=session_id, expert_id=expert_id
         )
         await self._persist(session_id, answer, state)
-        self._spawn(self._remember(message, answer, user_id))
+        # Память о пользователе в пакетном режиме /run НЕ извлекаем: это отдельный LLM-вызов на каждый
+        # запрос, который на проверке съедает лимит токенов. Персонализация нужна только в живом чате (stream).
         return {
             "answer": answer,
             "is_unsafe_request": bool(state.get("is_unsafe_request")),

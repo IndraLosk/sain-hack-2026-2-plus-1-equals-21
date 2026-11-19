@@ -33,8 +33,8 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-chat"
     llm_temperature: float = 0.3
     llm_max_tokens: int = 1200
-    llm_request_timeout: float = 120.0
-    llm_max_retries: int = 3
+    llm_request_timeout: float = 60.0
+    llm_max_retries: int = 2
     history_messages: int = 8
 
     @property

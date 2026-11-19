@@ -722,11 +722,18 @@ def _index_html() -> str:
     return re.sub(r'(/assets/[^"?\s]+)', r'\1?v=' + build, html)
 
 
+# Сервисный корень: стенд опрашивает его для проверки живости приложения.
+# Регистрируется ДО catch-all /{full_path:path}, чтобы / не перехватывался SPA-фолбэком.
+@app.get("/", include_in_schema=False)
+async def root() -> JSONResponse:
+    return JSONResponse({"team": "team02", "name": "2 + 1 = 21", "status": "ok"})
+
+
 if FRONTEND_DIST.exists():
     app.mount("/assets", ImmutableStaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
 
-    @app.get("/", include_in_schema=False)
-    async def index() -> HTMLResponse:
+    @app.get("/ui", include_in_schema=False, response_class=HTMLResponse)
+    async def ui_index() -> HTMLResponse:
         return HTMLResponse(_index_html(), headers=_NO_CACHE)
 
     @app.get("/{full_path:path}", include_in_schema=False)
@@ -736,9 +743,9 @@ if FRONTEND_DIST.exists():
             return FileResponse(candidate, headers=_NO_CACHE)
         return HTMLResponse(_index_html(), headers=_NO_CACHE)
 else:
-    @app.get("/", include_in_schema=False)
-    async def no_frontend() -> JSONResponse:
-        return JSONResponse({"detail": "frontend/dist не собран — запустите ./run.sh с REBUILD_UI=1"})
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def no_frontend(full_path: str) -> JSONResponse:
+        return JSONResponse({"detail": "frontend/dist не собран — соберите клиент: cd frontend && npm install && npm run build"})
 
 
 __all__ = ["app"]
