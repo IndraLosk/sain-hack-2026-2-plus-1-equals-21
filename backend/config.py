@@ -1,8 +1,8 @@
 """Конфигурация приложения + валидируемый каталог программ и экспертов.
 
 Все настройки читаются из окружения / .env (см. env.example).
-Дефолты рассчитаны на «реальный сайт»: LLM — OpenAI-совместимый шлюз,
-эмбеддинги — ONNX Runtime (только CPU), хранилища — SQLite с лёгким переходом на PostgreSQL.
+Дефолты рассчитаны на стенд хакатона: LLM — OpenAI-совместимый шлюз,
+поиск — лёгкий BM25 (чистый Python), хранилища — SQLite с лёгким переходом на PostgreSQL.
 """
 from __future__ import annotations
 
@@ -54,22 +54,14 @@ class Settings(BaseSettings):
     def active_api_key(self) -> str:
         return self.deepseek_api_key if self.provider == "deepseek" else self.llm_api_key
 
-    # --- эмбеддинги: ONNX Runtime, только CPU ---
-    embedding_model: str = "BAAI/bge-m3"
-    embedding_onnx_path: str = ""  # пусто → кэш data/models/bge-m3-onnx
-    embedding_max_length: int = 512
-    embedding_batch_size: int = 8
-    embedding_threads: int = 0  # 0 → авто
-
-    # --- векторная БД ---
-    chroma_dir: str = str(BASE_DIR / "data" / "chroma")
+    # --- поиск: лёгкий BM25 (чистый Python, без моделей и векторов) ---
+    chroma_dir: str = str(BASE_DIR / "data" / "bm25")  # каталог persist-копии индекса
     chroma_collection: str = "scientific_articles"
     chunk_size: int = 500
     chunk_overlap: int = 100
     retrieval_top_k: int = 3
     retrieval_top_k_multi: int = 6  # мульти-режим: больше контекста, чтобы ответы различались
-    retrieval_min_similarity: float = 0.55  # ниже порога — «в базе нет подтверждённых исследований»
-    recent_candidates_limit: int = 64  # сколько свежих чанков досчитывать явно
+    retrieval_min_similarity: float = 0.15  # ниже порога — «в базе нет подтверждённых исследований»
 
     # --- хранилища: SQLite по умолчанию, PostgreSQL при заданном DATABASE_URL ---
     database_url: str = ""

@@ -297,6 +297,119 @@ def _is_domain_question(text: str) -> bool:
     return any(word in lowered for word in _DOMAIN_WORDS)
 
 
+# Доменный словарь рус→англ для ретрива без LLM (fallback при недоступности модели).
+_RU_EN_DOMAIN = {
+    "мелатон": "melatonin",
+    "дозировк": "dosage",
+    "сколько": "dosage amount",
+    "свет": "light",
+    "вечер": "evening light",
+    "утро": "morning light",
+    "вредит": "harm disrupt",
+    "помогает": "benefit improve",
+    "экран": "screen",
+    "телефон": "smartphone screen",
+    "гаджет": "smartphone screen",
+    "кофеин": "caffeine",
+    "кофе": "caffeine coffee",
+    "температур": "temperature thermal",
+    "спальн": "bedroom temperature",
+    "холодн": "cool cold temperature",
+    "прохладн": "cool temperature",
+    "циркад": "circadian rhythm",
+    "ритм": "circadian rhythm",
+    "сон": "sleep",
+    "сна": "sleep",
+    "сну": "sleep",
+    "сне": "sleep",
+    "спать": "sleep",
+    "сплю": "sleep",
+    "спал": "sleep",
+    "уснуть": "fall asleep insomnia",
+    "заснуть": "fall asleep insomnia",
+    "бессон": "insomnia",
+    "просыпа": "wake awaken night",
+    "ночь": "night",
+    "алкогол": "alcohol",
+    "вино": "alcohol wine",
+    "стресс": "stress",
+    "тревог": "anxiety stress",
+    "упражнен": "exercise physical activity",
+    "спорт": "exercise",
+    "движен": "physical activity",
+    "питани": "diet nutrition food",
+    "еда": "diet food",
+    "режим": "sleep schedule routine",
+    "подъем": "wake time",
+    "будильник": "alarm wake time",
+    "дневн": "daytime nap",
+    "отдых": "rest break",
+    "голод": "hunger",
+    "депресс": "depression mood",
+    "бодрост": "alertness energy",
+    "энерг": "energy alertness",
+    "устал": "fatigue tired",
+    "самочувств": "wellbeing",
+    "здоров": "health",
+    "дыхани": "breathing",
+    "медьтация": "meditation relaxation",
+    "музык": "music audio",
+    "шум": "noise sound",
+}
+
+
+def _heuristic_translate(text: str) -> str:
+    """Простой перевод доменных слов. Возвращает англ. строку или ''."""
+    lowered = (text or "").lower()
+    found: List[str] = []
+    for _ru, en in _RU_EN_DOMAIN.items():
+        if _ru in lowered:
+            found.append(en)
+    return ", ".join(dict.fromkeys(found))[:500]
+
+
+async def translate_query_for_retrieval(question: str) -> str:
+    """Переводит русский запрос на английские ключевые слова для поиска по англ. статьям.
+
+    Пытаемся через LLM один раз; при недоступности — эвристический перевод по словарю.
+    Возвращает строку для BM25 или пустую строку (тогда ретривер ведёт себя как раньше).
+    """
+    if not question or not question.strip():
+        return ""
+    # Быстрый путь: если в запросе уже есть латинские слова — используем их как есть.
+    import re as _re
+    latin = _re.findall(r"[a-zA-Z]{2,}", question)
+    if latin and len(" ".join(latin)) > 6:
+        return " ".join(latin)
+    try:
+        from .llm import get_llm
+        raw = await asyncio.wait_for(
+            get_llm().chat(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Ты переводишь краткий вопрос пользователя о сне и здоровье на набор английских "
+                            "ключевых слов для поиска по англоязычным научным статьям. Верни ТОЛЬКО английские "
+                            "ключевые слова, разделённые пробелом, без знаков препинания и без пояснений. "
+                            "Пример: «сколько мелатонина пить чтобы уснуть» -> melatonin dose insomnia fall asleep"
+                        ),
+                    },
+                    {"role": "user", "content": (question or "")[:500]},
+                ],
+                temperature=0.0,
+                num_predict=80,
+            ),
+            timeout=15.0,
+        )
+        cleaned = _re.sub(r"[^a-zA-Z ]+", " ", (raw or "")).strip()
+        if cleaned:
+            return " ".join(cleaned.split())[:300]
+    except Exception as exc:  # noqa: BLE001 — модель недоступна или сбой
+        logger.warning("query translation via LLM failed, heuristic fallback: %s", exc)
+    return _heuristic_translate(question)
+
+
 async def retriever_node(state: AgentState) -> Dict[str, Any]:
     """Гибридный поиск по свежей базе; пусто → запрос в журнал пробелов знаний."""
     question = _last_user_text(state.get("messages") or [])
@@ -307,17 +420,24 @@ async def retriever_node(state: AgentState) -> Dict[str, Any]:
         # 1) «сырой» вопрос — так отсекаются темы вне базы
         top_k = settings.retrieval_top_k_multi if state.get("multi") else settings.retrieval_top_k
         docs = await search_async(question, program_id=program_id, top_k=top_k)
-        if not docs and _is_domain_question(question):
-            # 2) короткие вопросы по теме дополняем доменным контекстом
+        if docs:
+            return {"retrieved_docs": _docs_to_state(docs), "no_evidence": False}
+        # 2) статьи в базе на английском: если русского нет — переводим запрос на английские ключевые слова.
+        #    LLM-перевод делаем ровно один раз и только когда точного совпадения не было.
+        translated = await translate_query_for_retrieval(question)
+        if translated:
+            docs = await search_async(translated, program_id=program_id, top_k=top_k)
+        if not docs and translated:
+            # 3) расширяем доменными ключевыми словами (fallback без LLM-затрат)
             docs = await search_async(
-                f"{question} sleep, circadian rhythm, insomnia, light, caffeine",
+                f"{translated} sleep, circadian rhythm, insomnia, light, caffeine, bedtime",
                 program_id=program_id,
                 top_k=top_k,
             )
         if not docs:
-            # 3) фолбэк по всей базе — с более строгим порогом
+            # 4) фолбэк по всей базе — с более строгим порогом
             docs = await search_async(
-                question,
+                translated or question,
                 program_id=None,
                 top_k=top_k,
                 min_similarity=max(settings.retrieval_min_similarity, 0.6),

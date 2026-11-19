@@ -1,8 +1,8 @@
-# Backend «Эксперт как плейлист» — без docker.
+# Backend «Эксперт как плейлист» — без docker, без тяжёлых моделей.
 # LLM: только gpt-6-luna (OpenAI-совместимый API).
-# Эмбеддинги: только BAAI/bge-m3 на ONNX Runtime (CPU) — без torch/transformers.
+# Поиск: лёгкий BM25 (чистый Python, без эмбеддингов и векторных БД).
 
-# --- загрузка документов в векторную базу (.pdf) ---
+# --- загрузка документов (.pdf) ---
 pypdf>=4.0
 
 # --- API / граф ---
@@ -17,15 +17,6 @@ langgraph>=0.2
 langgraph-checkpoint
 langgraph-checkpoint-sqlite
 langchain-core>=0.3
-
-# --- векторная БД ---
-chromadb>=0.5
-
-# --- эмбеддинги BAAI/bge-m3 на CPU (без torch) ---
-onnxruntime>=1.17
-tokenizers>=0.15
-numpy>=1.26
-huggingface_hub>=0.23
 
 # --- хранилища: SQLite по умолчанию, PostgreSQL — опционально ---
 sqlalchemy[asyncio]>=2.0

@@ -83,6 +83,71 @@ async def _fetch_remote(*, token: Optional[str], dataset_code: str) -> Optional[
         return None
 
 
+async def ensure_dataset_indexed(*, token: Optional[str] = None) -> int:
+    """Индексирует статьи набора kейса 4 в BM25, если база ещё пуста.
+
+    Вызывается при старте приложения. Читает набор один раз — сначала API (если токен задан),
+    иначе локальный `data/case4-dev.json` — и заливает статьи в поисковый слой.
+    Возвращает число проиндексированных статей; 0 — если набора нет или он уже был загружен.
+    """
+    from .config import get_catalog
+    from .vectorstore import add_article_async, get_store
+
+    store = get_store()
+    if store.count() > 0:
+        return 0
+
+    dataset = await fetch_dataset(token=token, dataset_code=None)
+    if not dataset:
+        dataset = local_dataset()
+    if not dataset:
+        logger.warning("no dataset available for indexing (case4)")
+        return 0
+
+    articles = dataset.get("articles") or []
+    if not articles:
+        logger.warning("dataset has no articles to index")
+        return 0
+
+    program_ids = [p.id for p in get_catalog().programs]
+    preferred = "sleep_recovery" if "sleep_recovery" in program_ids else (program_ids[0] if program_ids else "sleep_recovery")
+    indexed = 0
+    for article in articles:
+        sections = [
+            {
+                "section_id": str(s.get("section_id")),
+                "title": str(s.get("title") or ""),
+                "text": str(s.get("text") or ""),
+            }
+            for s in article.get("sections") or []
+            if str(s.get("text") or "").strip()
+        ]
+        if not sections:
+            continue
+        year = int(article.get("year") or 2020)
+        try:
+            await add_article_async(
+                program_id=preferred,
+                title=str(article.get("title") or article.get("article_id")),
+                published_date=f"{year:04d}-01-01",
+                content="\n\n".join(s["text"] for s in sections),
+                article_id=str(article.get("article_id")),
+                sections=sections,
+                extra_metadata={
+                    "authors": ", ".join(article.get("authors") or []),
+                    "doi": article.get("doi"),
+                    "year": year,
+                    "license": str((article.get("license") or {}).get("name") or ""),
+                    "source": "case4",
+                },
+            )
+            indexed += 1
+        except Exception as exc:  # noqa: BLE001 — одна статья не должна ронять старт
+            logger.warning("auto-index failed for article %s: %s", article.get("article_id"), exc)
+    logger.info("case4 auto-indexed %d articles (%d chunks)", indexed, store.count())
+    return indexed
+
+
 def dataset_info() -> Dict[str, Any]:
     """Служебная информация о загруженном наборе (без секретов)."""
     data = _cache.get("data") or {}
@@ -96,4 +161,4 @@ def dataset_info() -> Dict[str, Any]:
     }
 
 
-__all__ = ["fetch_dataset", "local_dataset", "dataset_info"]
+__all__ = ["fetch_dataset", "local_dataset", "dataset_info", "ensure_dataset_indexed"]

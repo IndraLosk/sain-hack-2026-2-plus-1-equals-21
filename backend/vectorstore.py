@@ -1,27 +1,55 @@
-"""Векторное хранилище: ChromaDB + эмбеддинги BAAI/bge-m3 на ONNX Runtime (CPU).
+"""Хранилище документов на чистых Python: BM25 (Okapi) + бонус свежести.
 
-Поиск гибридный: косинусная близость + бонус свежести, с жёстким порогом релевантности.
-Если ничего не прошло порог — возвращается пустой список, и агент честно говорит,
-что в базе нет подтверждённых исследований (а запрос уходит в журнал пробелов знаний).
+Замена ChromaDB + ONNX bge-m3 на поиск без внешних моделей и без векторов.
+Подходит под ограничения стенда: офлайн, только табличные вычисления, без весов моделей
+и без скачивания чего-либо в runtime. Пакеты — только стандартная библиотека.
+
+Индекс живой: статьи хранятся в памяти, persist-копия (JSON) в каталоге `persist_dir`.
+Поиск: токенизация запроса → BM25-оценка по всем чанкам → нормализация в 0..1 →
+порог релевантности → бонус свежести → не более N чанков на статью.
+
+Совместимость интерфейса сохранена: `RetrievedChunk.distance = 1 - normalized_score`,
+поэтому логика агента (пороги, отказы, журнал пробелов знаний) не меняется.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
+import re
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-import chromadb
-from chromadb.config import Settings as ChromaSettings
-
 from .config import get_settings
-from .embeddings import embed_texts
 
 logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------- #
+# Токенизация (русский + английский, латиница и кириллица)
+# --------------------------------------------------------------------------- #
+_TOKEN_RE = re.compile(r"[^\W\d_]+|\d+", re.UNICODE)
+
+
+def tokenize(text: str) -> List[str]:
+    """Нижний регистр, вырезаем токены (слова и числа), без пунктуации и стоп-слов."""
+    if not text:
+        return []
+    STOP = {
+        "и", "в", "во", "не", "что", "он", "на", "я", "с", "со", "как", "а", "то", "все",
+        "она", "так", "его", "но", "да", "ты", "к", "у", "же", "вы", "за", "бы", "по",
+        "только", "ее", "мне", "было", "вот", "от", "меня", "еще", "нет", "о", "из", "ему",
+        "теперь", "когда", "даже", "ну", "вдруг", "ли", "если", "уже", "или", "ни", "быть",
+        "the", "and", "of", "to", "in", "a", "is", "that", "it", "was", "for", "on", "with",
+        "as", "are", "this", "be", "at", "from", "by", "an", "or", "we", "their", "which",
+    }
+    out = [t for t in _TOKEN_RE.findall((text or "").lower()) if t and t not in STOP]
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -71,7 +99,6 @@ def chunk_text(text: str, chunk_size: int | None = None, overlap: int | None = N
     if current:
         chunks.append(current)
 
-    # страховка: предложение длиннее окна
     fixed: List[str] = []
     for chunk in chunks:
         if len(chunk) <= size * 2:
@@ -94,11 +121,14 @@ def today_iso() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
+# --------------------------------------------------------------------------- #
+# RetrievedChunk (тот же интерфейс, что и у хромового слоя)
+# --------------------------------------------------------------------------- #
 @dataclass
 class RetrievedChunk:
     document: str
     metadata: Dict[str, Any]
-    distance: float
+    distance: float  # 1 - normalized_score (0..1). 0 = лучший результат.
 
     @property
     def article_id(self) -> str:
@@ -129,35 +159,105 @@ class RetrievedChunk:
         return bool(added) and (time.time() - added) <= days * 86400
 
 
+def _chunk_score_to_distance(score: float, max_score: float) -> float:
+    """Нормализуем BM25-оценку в [0,1] и инвертируем в 'расстояние'."""
+    if max_score <= 0:
+        return 1.0
+    norm = max(0.0, min(1.0, score / max_score))
+    return 1.0 - norm
+
+
+# --------------------------------------------------------------------------- #
+# BM25-индекс (Okapi)
+# --------------------------------------------------------------------------- #
+class _BM25:
+    """Лёгкий BM25-Okapi на чистом Python для набора чанков в памяти."""
+
+    def __init__(self) -> None:
+        self._docs: List[List[str]] = []  # токены каждого документа
+        self._doc_len: List[int] = []
+
+    def build(self, tokenized_docs: Sequence[List[str]]) -> None:
+        self._docs = [list(d) for d in tokenized_docs]
+        self._doc_len = [len(d) for d in self._docs]
+
+    def search(self, query_tokens: Sequence[str], k1: float = 1.5, b: float = 0.75) -> List[float]:
+        """Возвращает BM25-оценки для каждого документа (0, если нет совпадений)."""
+        if not self._docs:
+            return []
+        N = len(self._docs)
+        avg_len = sum(self._doc_len) / N if N else 0.0
+        scores = [0.0] * N
+        query_tokens = list(query_tokens)
+        if not query_tokens:
+            return scores
+
+        df: Dict[str, int] = {}
+        for doc in self._docs:
+            for token in set(doc):
+                df[token] = df.get(token, 0) + 1
+
+        for token in query_tokens:
+            idf = math.log(1 + (N - df.get(token, 0) + 0.5) / (df.get(token, 0) + 0.5))
+            if idf <= 0:
+                continue
+            for i, doc in enumerate(self._docs):
+                tf = doc.count(token)
+                if tf == 0:
+                    continue
+                dl = self._doc_len[i]
+                denom = tf + k1 * (1 - b + b * dl / avg_len) if avg_len else tf + k1
+                scores[i] += idf * (tf * (k1 + 1)) / denom
+        return scores
+
+
 # --------------------------------------------------------------------------- #
 # Хранилище
 # --------------------------------------------------------------------------- #
 class VectorStore:
-    """Обёртка над ChromaDB (persistent, локальный каталог data/chroma)."""
+    """In-memory BM25-индекс с JSON-persist. Публичный API как у Chroma-слоя."""
 
     def __init__(self, persist_dir: str | None = None, collection_name: str | None = None) -> None:
         settings = get_settings()
         self.persist_dir = persist_dir or settings.chroma_dir
         self.collection_name = collection_name or settings.chroma_collection
-        self._client = chromadb.PersistentClient(
-            path=self.persist_dir,
-            settings=ChromaSettings(anonymized_telemetry=False, allow_reset=True),
-        )
-        self._collection = self._get_collection()
+        self._chunks: List[Dict[str, Any]] = []      # (document, meta)
+        self._bm25 = _BM25()
+        self._persist_path = Path(self.persist_dir) / (self.collection_name + ".json")
+        self._lock = threading.Lock()
+        self._load()
 
-    def _get_collection(self):
-        return self._client.get_or_create_collection(
-            name=self.collection_name,
-            metadata={"hnsw:space": "cosine", "description": "scientific articles chunks (bge-m3 onnx)"},
-        )
-
-    def count(self) -> int:
+    # ---- persistence ----------------------------------------------------- #
+    def _save(self) -> None:
         try:
-            return int(self._collection.count())
-        except Exception:  # pragma: no cover
-            return 0
+            self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+            self._persist_path.write_text(
+                json.dumps({"chunks": self._chunks}, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning("bm25 persist failed: %s", exc)
 
-    # ------------------------------------------------------------------ #
+    def _load(self) -> None:
+        try:
+            if self._persist_path.exists():
+                data = json.loads(self._persist_path.read_text(encoding="utf-8"))
+                self._chunks = list(data.get("chunks") or [])
+        except Exception as exc:  # pragma: no cover
+            logger.warning("bm25 load failed, starting empty: %s", exc)
+            self._chunks = []
+        self._rebuild_index()
+
+    def _rebuild_index(self) -> None:
+        self._bm25.build([tokenize(c.get("document", "")) for c in self._chunks])
+
+    # ---- basics ----------------------------------------------------------- #
+    def count(self) -> int:
+        return len(self._chunks)
+
+    def article_ids(self) -> set[str]:
+        return {str(c.get("metadata", {}).get("article_id")) for c in self._chunks if c.get("metadata")}
+
+    # ---- add / delete ------------------------------------------------------ #
     def add_article(
         self,
         *,
@@ -169,13 +269,13 @@ class VectorStore:
         sections: Optional[List[Dict[str, str]]] = None,
         extra_metadata: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, int]:
-        """Режет статью на чанки, считает эмбеддинги и пишет в Chroma."""
+        """Режет статью на чанки и добавляет их в BM25-индекс."""
         settings = get_settings()
         article_id = article_id or f"art_{uuid.uuid4().hex[:12]}"
         added_at = int(time.time())
         self.delete_article(article_id)  # идемпотентность
 
-        blocks: List[Tuple[str, str, str]] = []  # (section_id, section_title, text)
+        blocks: List[Tuple[str, str, str]] = []
         if sections:
             for section in sections:
                 blocks.append(
@@ -188,67 +288,41 @@ class VectorStore:
         else:
             blocks.append(("sec_main", title, content))
 
-        documents: List[str] = []
-        metadatas: List[Dict[str, Any]] = []
-        ids: List[str] = []
-        for sec_id, sec_title, text in blocks:
-            for idx, chunk in enumerate(chunk_text(text, settings.chunk_size, settings.chunk_overlap)):
-                meta: Dict[str, Any] = {
-                    "article_id": article_id,
-                    "section_id": sec_id,
-                    "section_title": sec_title,
-                    "title": title,
-                    "program_id": program_id,
-                    "published_date": published_date,
-                    "added_at": added_at,
-                    "chunk_index": idx,
-                }
-                for key, value in (extra_metadata or {}).items():
-                    if value is not None and key not in meta:
-                        meta[key] = value
-                documents.append(chunk)
-                metadatas.append(meta)
-                ids.append(f"{article_id}:{sec_id}:{idx}")
-
-        if not documents:
-            return article_id, 0
-
-        self._collection.add(
-            documents=documents, metadatas=metadatas, ids=ids, embeddings=embed_texts(documents)
-        )
-        logger.info("article %s indexed: %d chunks (program=%s)", article_id, len(ids), program_id)
-        return article_id, len(ids)
+        new_chunks: List[Dict[str, Any]] = []
+        with self._lock:
+            for sec_id, sec_title, text in blocks:
+                for idx, chunk in enumerate(chunk_text(text, settings.chunk_size, settings.chunk_overlap)):
+                    meta: Dict[str, Any] = {
+                        "article_id": article_id,
+                        "section_id": sec_id,
+                        "section_title": sec_title,
+                        "title": title,
+                        "program_id": program_id,
+                        "published_date": published_date,
+                        "added_at": added_at,
+                        "chunk_index": idx,
+                    }
+                    for key, value in (extra_metadata or {}).items():
+                        if value is not None and key not in meta:
+                            meta[key] = value
+                    new_chunks.append({"document": chunk, "metadata": meta})
+            self._chunks.extend(new_chunks)
+            self._rebuild_index()
+            self._save()
+        logger.info("article %s indexed: %d chunks (program=%s)", article_id, len(new_chunks), program_id)
+        return article_id, len(new_chunks)
 
     def delete_article(self, article_id: str) -> None:
-        try:
-            self._collection.delete(where={"article_id": article_id})
-        except Exception:  # pragma: no cover
-            pass
+        with self._lock:
+            before = len(self._chunks)
+            self._chunks = [
+                c for c in self._chunks if str(c.get("metadata", {}).get("article_id")) != article_id
+            ]
+            if len(self._chunks) != before:
+                self._rebuild_index()
+                self._save()
 
-    # ------------------------------------------------------------------ #
-    def _fresh_chunks(self, program_id: str | None) -> List[RetrievedChunk]:
-        """Чанки статей, добавленных в базу за последние `freshness_days` дней.
-
-        HNSW может не отдать только что вставленные векторы, а продукт требует
-        «новое знание учитывается сразу» — такие чанки досчитываем явно.
-        """
-        settings = get_settings()
-        threshold = int(time.time() - settings.freshness_days * 86400)
-        where: Dict[str, Any] = {"added_at": {"$gte": threshold}}
-        if program_id:
-            where = {"$and": [{"program_id": program_id}, {"added_at": {"$gte": threshold}}]}
-        try:
-            res = self._collection.get(where=where, include=["documents", "metadatas"])
-        except Exception as exc:  # pragma: no cover
-            logger.warning("fresh chunks query failed: %s", exc)
-            return []
-        pairs = list(zip(res.get("documents") or [], res.get("metadatas") or []))
-        pairs.sort(key=lambda p: int((p[1] or {}).get("added_at") or 0), reverse=True)
-        pairs = pairs[: settings.recent_candidates_limit]
-        return [
-            RetrievedChunk(document=doc or "", metadata=dict(meta or {}), distance=0.0) for doc, meta in pairs
-        ]
-
+    # ---- search ------------------------------------------------------------ #
     def search(
         self,
         query: str,
@@ -256,46 +330,32 @@ class VectorStore:
         top_k: int | None = None,
         min_similarity: float | None = None,
     ) -> List[RetrievedChunk]:
-        """Косинусный поиск + бонус свежести; всё ниже порога отбрасывается."""
+        """BM25-поиск + порог + бонус свежести; всё ниже порога отбрасывается."""
         settings = get_settings()
         k = top_k or settings.retrieval_top_k
         threshold = settings.retrieval_min_similarity if min_similarity is None else min_similarity
         if not query.strip() or self.count() == 0:
             return []
 
-        query_embedding = embed_texts([query], is_query=True)[0]
-        where = {"program_id": program_id} if program_id else None
-        try:
-            n_candidates = min(max(k * 12, 60), max(self.count(), 1))
-            res = self._collection.query(
-                query_embeddings=[query_embedding],
-                n_results=n_candidates,
-                where=where,
-                include=["documents", "metadatas", "distances"],
-            )
-        except Exception as exc:  # pragma: no cover
-            logger.warning("chroma query failed: %s", exc)
-            res = {}
-
-        documents = list((res.get("documents") or [[]])[0])
-        metadatas = list((res.get("metadatas") or [[]])[0])
-        distances = list((res.get("distances") or [[]])[0])
-
-        seen = {(str(m.get("article_id")), str(m.get("section_id"))) for m in metadatas if m}
-        for chunk in self._fresh_chunks(program_id):
-            key = (chunk.article_id, chunk.section_id)
-            if key in seen:
-                continue
-            seen.add(key)
-            sim = float(sum(a * b for a, b in zip(query_embedding, embed_texts([chunk.document])[0])))
-            documents.append(chunk.document)
-            metadatas.append(chunk.metadata)
-            distances.append(max(0.0, 1.0 - sim))
-
+        with self._lock:
+            scores = self._bm25.search(tokenize(query))
+        # фильтр по программе
+        candidate_idx = [
+            i for i, c in enumerate(self._chunks)
+            if program_id is None or (c.get("metadata") or {}).get("program_id") == program_id
+        ]
+        max_score = max((scores[i] for i in candidate_idx), default=0.0)
         now = time.time()
         scored: List[Tuple[float, RetrievedChunk]] = []
-        for doc, meta, dist in zip(documents, metadatas, distances):
-            chunk = RetrievedChunk(document=doc or "", metadata=dict(meta or {}), distance=float(dist or 0.0))
+        for i in candidate_idx:
+            score = scores[i]
+            if score <= 0:
+                continue
+            chunk = RetrievedChunk(
+                document=str(self._chunks[i].get("document") or ""),
+                metadata=dict(self._chunks[i].get("metadata") or {}),
+                distance=_chunk_score_to_distance(score, max_score),
+            )
             similarity = 1.0 - chunk.distance
             if similarity < threshold:
                 continue
@@ -315,16 +375,12 @@ class VectorStore:
                 break
         return result
 
-    # ------------------------------------------------------------------ #
+    # ---- articles ------------------------------------------------------------ #
     def list_articles(self, program_id: str | None = None) -> List[Dict[str, Any]]:
-        where = {"program_id": program_id} if program_id else None
-        try:
-            res = self._collection.get(where=where, include=["metadatas"])
-        except Exception:  # pragma: no cover
-            return []
         grouped: Dict[str, Dict[str, Any]] = {}
-        for meta in res.get("metadatas") or []:
-            if not meta:
+        for c in self._chunks:
+            meta = c.get("metadata") or {}
+            if program_id and meta.get("program_id") != program_id:
                 continue
             aid = str(meta.get("article_id"))
             entry = grouped.setdefault(
@@ -347,23 +403,20 @@ class VectorStore:
         articles.sort(key=lambda a: a["added_at"], reverse=True)
         return articles
 
-    def article_ids(self) -> set[str]:
-        try:
-            res = self._collection.get(include=["metadatas"])
-        except Exception:  # pragma: no cover
-            return set()
-        return {str(m.get("article_id")) for m in (res.get("metadatas") or []) if m}
-
     def reset(self) -> None:
-        try:
-            self._client.delete_collection(self.collection_name)
-        except Exception:  # pragma: no cover
-            pass
-        self._collection = self._get_collection()
+        with self._lock:
+            self._chunks = []
+            self._rebuild_index()
+            try:
+                if self._persist_path.exists():
+                    self._persist_path.unlink()
+            except Exception:  # pragma: no cover
+                pass
+            self._save()
 
 
 # --------------------------------------------------------------------------- #
-# Синглтон + асинхронные обёртки (CPU-bound работа — в отдельном потоке)
+# Синглтон + асинхронные обёртки (CPU-bound — в отдельном потоке)
 # --------------------------------------------------------------------------- #
 _store_lock = threading.Lock()
 _store: Optional[VectorStore] = None
@@ -400,4 +453,5 @@ __all__ = [
     "chunk_text",
     "parse_date",
     "today_iso",
+    "tokenize",
 ]

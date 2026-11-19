@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # В репозиторий попадает только приложение:
-#   backend/ (FastAPI + LangGraph + Chroma + ONNX), frontend/ (React + TS + Tailwind),
-#   config/, data/case4-dev.json, requirements.txt, run.sh, env.example
+#   backend/ (FastAPI + LangGraph + BM25), frontend/ (React + TS + Tailwind),
+#   config/, data/case4-dev.json, requirements.txt, start.sh, env.example
 # ---------------------------------------------------------------------------
 
 # --- виртуальное окружение и кэши Python ---
@@ -32,6 +32,7 @@ frontend/tsconfig.tsbuildinfo
 # --- сгенерированные данные (пересоздаются при первом старте) ---
 data/chroma/
 data/models/
+data/bm25/
 *.sqlite
 *.sqlite3
 *.db

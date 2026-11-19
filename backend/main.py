@@ -56,7 +56,7 @@ from .article_store import (
 )
 from .ingest import file_to_text, index_text, ingest_link
 from .config import BASE_DIR, get_catalog, get_settings
-from .hackapi import dataset_info, fetch_dataset
+from .hackapi import dataset_info, ensure_dataset_indexed, fetch_dataset
 from .llm import close_http_client, get_llm, provider_info, set_provider
 from .schemas import (
     ArticleAccepted,
@@ -101,6 +101,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await init_db()
     await asyncio.to_thread(init_article_db)
     await get_runtime().startup()
+    await ensure_dataset_indexed()
     logger.info("app started (provider=%s)", get_settings().provider)
     try:
         yield
@@ -142,7 +143,7 @@ async def public_config() -> Dict[str, Any]:
     return {
         "llm_model": settings.active_model,
         "llm_provider": settings.provider,
-        "embedding_model": settings.embedding_model,
+        "embedding_model": "bm25",
         "disclaimer": settings.disclaimer,
         "freshness_days": settings.freshness_days,
         "max_message_length": 4000,
@@ -589,7 +590,7 @@ async def health() -> Dict[str, Any]:
             "collection": store.collection_name,
             "chunks": store.count(),
             "articles": articles_count,
-            "embedding_model": get_settings().embedding_model,
+            "retriever": "bm25",
         },
         "database": db_stats,
         "case4_dataset": dataset_info(),
