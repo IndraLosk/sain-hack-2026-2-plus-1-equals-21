@@ -58,3 +58,4 @@ known_hosts
 web/
 
 check.sh
+check_remote.sh

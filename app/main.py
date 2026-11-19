@@ -373,13 +373,13 @@ def _infer_program(dataset: Dict[str, Any], req: Dict[str, Any]) -> str:
 
 
 async def _fetch_dataset(request: Request, dataset_code: Optional[str]) -> Optional[Dict[str, Any]]:
-    """getData у стенда хакатона (если задан SAIN_BASE_URL и есть токен)."""
+    """getData у сервиса хакатона (базовый URL из env HACK_API_URL, токен — из заголовка /run)."""
     import os
 
-    base = os.getenv("SAIN_BASE_URL")
+    base = os.getenv("HACK_API_URL")
     if not base or not dataset_code:
         return None
-    token = request.headers.get("authorization") or os.getenv("SAIN_TOKEN")
+    token = request.headers.get("authorization") or os.getenv("HACK_TEAM_TOKEN")
     if not token:
         return None
     import httpx
