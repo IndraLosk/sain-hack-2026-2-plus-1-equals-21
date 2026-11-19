@@ -616,35 +616,70 @@ def _case4_answer(result: Dict[str, Any], record_id: str) -> Dict[str, Any]:
     }
 
 
+def _authorization_bearer(request: Request) -> str:
+    """Токен из заголовка Authorization: Bearer <токен>. Пустой, если не задан."""
+    value = request.headers.get("authorization", "")
+    if value.lower().startswith("bearer "):
+        return value[7:].strip()
+    return value.strip()
+
+
+def _case_utterance(record: Dict[str, Any]) -> str:
+    """Текст вопроса из записи набора кейса 4 (поле `utterance.text`)."""
+    utterance = record.get("utterance")
+    if isinstance(utterance, dict):
+        return str(utterance.get("text") or "").strip()
+    if isinstance(utterance, str):
+        return utterance.strip()
+    return str(record.get("question") or record.get("query") or "").strip()
+
+
 @app.post("/run", tags=["case4"])
 async def run_case4(request: Request) -> JSONResponse:
-    """Демо-стенд: на вход пакет запросов кейса 4, на выход — ответы с цитатами."""
+    """Демо-стенд кейса 4.
+
+    Стенд шлёт `{"case": 4, "dataset_code": "..."}` с токеном в `Authorization`.
+    Решение само получает набор через `GET /case/4/getData` (этим токеном),
+    обрабатывает весь набор и возвращает контейнер `{"requests": [...]}`.
+    """
+    body: Any = None
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
         raise HTTPException(status_code=400, detail="body must be valid JSON")
 
-    records: List[Dict[str, Any]] = []
-    if isinstance(body, list):
-        records = [r for r in body if isinstance(r, dict)]
-    elif isinstance(body, dict):
-        records = [r for r in (body.get("requests") or body.get("records") or []) if isinstance(r, dict)]
-        if not records and body.get("question"):
-            records = [body]
+    if isinstance(body, dict):
+        dataset_code = str(body.get("dataset_code") or "").strip() or None
+    else:
+        dataset_code = None
+
+    token = _authorization_bearer(request)
+
+    dataset = await fetch_dataset(token=token or None, dataset_code=dataset_code)
+    records = [r for r in (dataset or {}).get("requests") or [] if isinstance(r, dict)]
+    if not records:
+        # фолбэк для локальной отладки: тело может прийти списком записей
+        if isinstance(body, list):
+            records = [r for r in body if isinstance(r, dict)]
+        elif isinstance(body, dict):
+            records = [r for r in (body.get("requests") or body.get("records") or []) if isinstance(r, dict)]
+
     if not records:
         raise HTTPException(status_code=400, detail="no requests in payload")
 
+    # база может быть пустой, если приложение успело ответить на GET / до индексации
+    await ensure_dataset_indexed(token=token or None)
+
     runtime = get_runtime()
-    settings = get_settings()
     answers: List[Dict[str, Any]] = []
     for index, record in enumerate(records):
         record_id = str(record.get("record_id") or record.get("id") or index)
-        question = str(record.get("question") or record.get("query") or "").strip()
+        question = _case_utterance(record)
         if not question:
             answers.append({"record_id": record_id, "text": NO_EVIDENCE_PHRASE, "refused": False, "citations": []})
             continue
         result = await runtime.run(
-            session_id=str(record.get("session_id") or f"case4-{record_id}"),
+            session_id=f"case4-{record_id}",
             program_id=str(record.get("program_id") or "sleep_recovery"),
             expert_id=str(record.get("expert_id") or "clinician"),
             message=question,
@@ -652,7 +687,7 @@ async def run_case4(request: Request) -> JSONResponse:
         )
         answers.append(_case4_answer(result, record_id))
 
-    return JSONResponse({"answers": answers, "model": settings.active_model})
+    return JSONResponse({"requests": answers})
 
 
 # --------------------------------------------------------------------------- #

@@ -4,7 +4,6 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 PORT="${PORT:-8000}"
-HOST="${HOST:-127.0.0.1}"
 
 # --- Фронтенд -------------------------------------------------------------
 if command -v npm >/dev/null 2>&1; then
@@ -17,5 +16,5 @@ else
 fi
 
 # --- Запуск ---------------------------------------------------------------
-echo "→ http://${HOST}:${PORT}  (Swagger: /docs)"
-exec python3 -m uvicorn backend.main:app --host "$HOST" --port "$PORT" --reload
+echo "→ http://0.0.0.0:${PORT}  (Swagger: /docs)"
+exec python3 -m uvicorn backend.main:app --host 0.0.0.0 --port "$PORT"
