@@ -20,17 +20,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent  # корень проекта
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=str(BASE_DIR / ".env"), env_file_encoding="utf-8", extra="ignore")
 
-    # --- LLM: OpenAI-совместимый API. Провайдер выбирается LLM_PROVIDER ---
-    # provider=openai (по умолчанию) → gpt-6-luna, LLM_BASE_URL + LLM_API_KEY
-    # provider=deepseek             → deepseek-chat, DEEPSEEK_BASE_URL + DEEPSEEK_API_KEY
-    # Переключается из UI: POST /api/v1/llm {"provider": "openai"|"deepseek"}
-    llm_provider: str = "openai"
+    # --- LLM: только прокси нейросети хакатона (OpenAI-совместимый API) ---
     llm_model: str = "gpt-6-luna"
     llm_base_url: str = "https://bifrost.be-healthy.tech/v1"
     llm_api_key: str = ""
-    deepseek_api_key: str = ""
-    deepseek_base_url: str = "https://api.deepseek.com/v1"
-    deepseek_model: str = "deepseek-chat"
     llm_temperature: float = 0.3
     llm_max_tokens: int = 1200
     llm_request_timeout: float = 60.0
@@ -39,20 +32,19 @@ class Settings(BaseSettings):
 
     @property
     def provider(self) -> str:
-        return (self.llm_provider or "openai").strip().lower()
+        return "openai"
 
     @property
     def active_model(self) -> str:
-        return self.deepseek_model if self.provider == "deepseek" else self.llm_model
+        return self.llm_model
 
     @property
     def active_base_url(self) -> str:
-        url = self.deepseek_base_url if self.provider == "deepseek" else self.llm_base_url
-        return (url or "").rstrip("/")
+        return (self.llm_base_url or "").rstrip("/")
 
     @property
     def active_api_key(self) -> str:
-        return self.deepseek_api_key if self.provider == "deepseek" else self.llm_api_key
+        return self.llm_api_key
 
     # --- поиск: лёгкий BM25 (чистый Python, без моделей и векторов) ---
     chroma_dir: str = str(BASE_DIR / "data" / "bm25")  # каталог persist-копии индекса

@@ -8,8 +8,8 @@ interface Props {
 }
 
 /**
- * Переключатель LLM: gpt-6-luna (по умолчанию) ↔ deepseek-chat.
- * Одна кнопка-«пилюля», клик меняет провайдера на сервере.
+ * Индикатор LLM: прокси нейросети хакатона (gpt-6-luna).
+ * Показывает текущего провайдера и состояние доступности ключа.
  */
 export default function LlmSwitch({ info, onChange, disabled, busy }: Props) {
   const options = info?.options ?? []

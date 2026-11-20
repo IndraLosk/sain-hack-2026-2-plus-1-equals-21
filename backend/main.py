@@ -151,17 +151,17 @@ async def public_config() -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# Переключение LLM на лету: deepseek ↔ gpt-6-luna
+# Состояние LLM (единственный провайдер — прокси нейросети хакатона)
 # --------------------------------------------------------------------------- #
 @app.get("/api/v1/llm", tags=["catalog"])
 async def read_llm() -> Dict[str, Any]:
-    """Текущий провайдер и список доступных для переключателя."""
+    """Текущее состояние LLM."""
     return provider_info()
 
 
 @app.post("/api/v1/llm", tags=["catalog"])
 async def switch_llm(payload: Dict[str, str]) -> Dict[str, Any]:
-    """Переключает LLM. Тело: {"provider": "deepseek" | "openai"}."""
+    """Возвращает состояние LLM. Тело: {"provider": "openai"}."""
     provider = (payload or {}).get("provider", "")
     try:
         return set_provider(provider)

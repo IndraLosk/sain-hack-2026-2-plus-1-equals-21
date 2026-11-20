@@ -15,7 +15,7 @@ from typing import Any, AsyncIterator, Dict, List
 
 import pytest
 
-os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+os.environ.setdefault("LLM_API_KEY", "test-key")
 
 from backend.agent import (  # noqa: E402
     LLM_FAILED_PHRASE,
@@ -43,7 +43,7 @@ def test_catalog_is_valid() -> None:
 
 def test_settings_provider_switch() -> None:
     settings = get_settings()
-    assert settings.provider in {"deepseek", "openai"}
+    assert settings.provider == "openai"
     assert settings.active_model
     assert settings.active_base_url and not settings.active_base_url.endswith("/")
     assert settings.retrieval_top_k_multi >= settings.retrieval_top_k
@@ -298,10 +298,6 @@ def test_llm_provider_switch() -> None:
         assert switched["provider"] == "openai"
         assert get_llm().provider == "openai"
         assert get_llm().model == get_settings().llm_model
-
-        back = set_provider("deepseek")
-        assert back["provider"] == "deepseek"
-        assert get_llm().model == get_settings().deepseek_model
     finally:
         set_provider(original)
 

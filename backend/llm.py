@@ -1,8 +1,6 @@
-"""LLM-слой: OpenAI-совместимый клиент (по умолчанию DeepSeek) и guardrail безопасности.
+"""LLM-слой: OpenAI-совместимый клиент прокси хакатона (gpt-6-luna) и guardrail безопасности.
 
-Провайдер выбирается переменной LLM_PROVIDER:
-* `deepseek` (по умолчанию) — DEEPSEEK_BASE_URL + DEEPSEEK_API_KEY, модель DEEPSEEK_MODEL;
-* `openai` — LLM_BASE_URL + LLM_API_KEY (стенд хакатона).
+База адреса, ключа и модели берётся из окружения: LLM_BASE_URL + LLM_API_KEY + LLM_MODEL.
 
 Общий пул HTTP-соединений на процесс, ретраи с backoff, стриминг,
 JSON-режим для guardrail и извлечения памяти.
@@ -59,32 +57,19 @@ async def _backoff(attempt: int) -> None:
 # OpenAI-совместимый провайдер
 # --------------------------------------------------------------------------- #
 class OpenAICompatLLM:
-    """Клиент /chat/completions: модель активного провайдера (DeepSeek по умолчанию)."""
+    """Клиент /chat/completions прокси нейросети хакатона (gpt-6-luna)."""
 
-    def __init__(self, provider: Optional[str] = None) -> None:
+    def __init__(self) -> None:
         settings = get_settings()
         self.temperature = settings.llm_temperature
         self.max_tokens = settings.llm_max_tokens
         self.timeout = settings.llm_request_timeout
         self.max_retries = max(1, settings.llm_max_retries)
-        self.use_provider(provider or settings.provider)
-
-    def use_provider(self, provider: str) -> None:
-        """Переключает провайдера на лету (deepseek ↔ openai), не пересоздавая клиент."""
-        settings = get_settings()
-        name = (provider or settings.provider).strip().lower()
-        if name not in AVAILABLE_PROVIDERS:
-            name = settings.provider
-        self.provider = name
-        if name == "deepseek":
-            self.model = settings.deepseek_model
-            self.base_url = (settings.deepseek_base_url or "").rstrip("/")
-            self.api_key = settings.deepseek_api_key
-        else:
-            self.model = settings.llm_model
-            self.base_url = (settings.llm_base_url or "").rstrip("/")
-            self.api_key = settings.llm_api_key
-        logger.info("LLM provider switched to %s (%s)", name, self.model)
+        self.provider = "openai"
+        self.model = settings.llm_model
+        self.base_url = (settings.llm_base_url or "").rstrip("/")
+        self.api_key = settings.llm_api_key
+        logger.info("LLM ready (%s / %s)", self.provider, self.model)
 
     @property
     def configured(self) -> bool:
@@ -115,8 +100,7 @@ class OpenAICompatLLM:
 
     def _require_key(self) -> None:
         if not self.configured:
-            key_name = "DEEPSEEK_API_KEY" if self.provider == "deepseek" else "LLM_API_KEY"
-            raise RuntimeError(f"{key_name} не задан — LLM недоступна")
+            raise RuntimeError("LLM_API_KEY не задан — LLM недоступна")
 
     async def chat(
         self,
@@ -198,8 +182,7 @@ class OpenAICompatLLM:
 
     async def health(self) -> Dict[str, Any]:
         if not self.configured:
-            key_name = "DEEPSEEK_API_KEY" if self.provider == "deepseek" else "LLM_API_KEY"
-            return {"ok": False, "provider": self.provider, "model": self.model, "error": f"{key_name} is not set"}
+            return {"ok": False, "provider": self.provider, "model": self.model, "error": "LLM_API_KEY is not set"}
         try:
             resp = await get_http_client().get(f"{self.base_url}/models", headers=self._headers(), timeout=10.0)
             resp.raise_for_status()
@@ -214,15 +197,14 @@ class OpenAICompatLLM:
 # --------------------------------------------------------------------------- #
 _llm: Optional[OpenAICompatLLM] = None
 
-# Провайдеры, между которыми можно переключаться из UI.
+# Единственный провайдер — прокси нейросети хакатона.
 AVAILABLE_PROVIDERS: Dict[str, Dict[str, str]] = {
-    "openai": {"label": "gpt-6-luna", "hint": "стенд хакатона"},
-    "deepseek": {"label": "deepseek-chat", "hint": "DeepSeek API"},
+    "openai": {"label": "gpt-6-luna", "hint": "прокси нейросети хакатона"},
 }
 
 
 def get_llm() -> OpenAICompatLLM:
-    """Единственный клиент активной модели (создаётся один раз на процесс)."""
+    """Единственный клиент прокси нейросети (создаётся один раз на процесс)."""
     global _llm
     if _llm is None:
         _llm = OpenAICompatLLM()
@@ -230,26 +212,22 @@ def get_llm() -> OpenAICompatLLM:
 
 
 def set_provider(provider: str) -> Dict[str, Any]:
-    """Переключает LLM на лету. Возвращает новое состояние провайдера."""
+    """Возвращает состояние LLM. Принимается только `openai`."""
     name = (provider or "").strip().lower()
     if name not in AVAILABLE_PROVIDERS:
         raise ValueError(f"unknown provider: {provider}")
-    llm = get_llm()
-    llm.use_provider(name)
     return provider_info()
 
 
 def provider_info() -> Dict[str, Any]:
-    """Текущий провайдер + список доступных для переключателя в UI."""
+    """Текущее состояние LLM (провайдер и модель)."""
     llm = get_llm()
     options = [
         {
             "id": key,
             "label": meta["label"],
             "hint": meta["hint"],
-            "configured": bool(
-                get_settings().deepseek_api_key if key == "deepseek" else get_settings().llm_api_key
-            ),
+            "configured": bool(get_settings().llm_api_key),
         }
         for key, meta in AVAILABLE_PROVIDERS.items()
     ]
