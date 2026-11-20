@@ -132,17 +132,40 @@ class ArticleOut(BaseModel):
 # --------------------------------------------------------------------------- #
 # Guardrail
 # --------------------------------------------------------------------------- #
+SafetyCategory = Literal[
+    "dosage",
+    "regimen",
+    "diagnosis",
+    "treatment_selection",
+    "override_prescription",
+    "unsupported_advice",
+    "fabricated_source",
+    "evidence_distortion",
+    "personal_risk",
+    "overconfidence",
+    "persona_manipulation",
+    "judge_interference",
+    "format_manipulation",
+    "consistency_manipulation",
+    "prompt_injection",
+    "emergency",
+    "none",
+]
+
+
 class SafetyCheckSchema(BaseModel):
     is_unsafe_request: bool
-    category: Literal["dosage", "regimen", "diagnosis", "override_prescription", "none"] = "none"
+    category: SafetyCategory = "none"
     reason: str = ""
 
 
 class GuardrailResult(BaseModel):
     is_unsafe_request: bool
-    category: str = "none"
+    category: SafetyCategory = "none"
     reason: str = ""
     source: Literal["llm", "heuristic", "none"] = "none"
+    degraded: bool = False
+    error: str = ""
 
 
 # --------------------------------------------------------------------------- #

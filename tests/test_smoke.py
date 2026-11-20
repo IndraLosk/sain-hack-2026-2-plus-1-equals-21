@@ -115,6 +115,27 @@ async def _fake_stream(messages: List[Dict[str, str]], **_: Any) -> AsyncIterato
     yield "эксперта."
 
 
+def _stub_retrieval(monkeypatch) -> None:
+    from backend.vectorstore import RetrievedChunk
+
+    doc = RetrievedChunk(
+        document="Evening light exposure can affect sleep and circadian timing.",
+        metadata={
+            "article_id": "art_test",
+            "section_id": "s001",
+            "title": "Light and sleep",
+            "published_date": "2024-01-01",
+            "added_at": 0,
+        },
+        distance=0.0,
+    )
+
+    async def fake_search(*args: Any, **kwargs: Any) -> List[RetrievedChunk]:
+        return [doc]
+
+    monkeypatch.setattr("backend.agent.search_async", fake_search)
+
+
 async def _collect(runtime: AgentRuntime, coro_factory) -> List[Dict[str, Any]]:
     events: List[Dict[str, Any]] = []
     async for event in coro_factory():
@@ -133,6 +154,7 @@ async def test_single_stream_with_stub_llm(tmp_path, monkeypatch) -> None:
     await init_db()
     rt = AgentRuntime()
     await rt.startup()
+    _stub_retrieval(monkeypatch)
     monkeypatch.setattr(get_llm(), "stream_chat", _fake_stream)
     try:
         events = await _collect(
@@ -166,6 +188,7 @@ async def test_multi_stream_shares_sources_and_varies_style(tmp_path, monkeypatc
     await init_db()
     rt = AgentRuntime()
     await rt.startup()
+    _stub_retrieval(monkeypatch)
 
     captured: List[str] = []
 
@@ -216,6 +239,7 @@ async def test_multi_stream_survives_llm_failure(tmp_path, monkeypatch) -> None:
     await init_db()
     rt = AgentRuntime()
     await rt.startup()
+    _stub_retrieval(monkeypatch)
 
     async def broken_stream(messages: List[Dict[str, str]], **_: Any) -> AsyncIterator[str]:
         raise RuntimeError("LLM down")
@@ -260,8 +284,9 @@ def test_api_catalog_and_health() -> None:
         health = client.get("/api/v1/health")
         assert health.status_code == 200
         payload = health.json()
-        assert "llm" in payload and "vector_store" in payload
+        assert "llm" in payload and "vector_store" in payload and "guardrail" in payload
         assert payload["llm"]["model"]
+        assert "degraded" in payload["guardrail"] and "attempts" in payload["guardrail"]
 
         config = client.get("/api/v1/config")
         assert config.status_code == 200

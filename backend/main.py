@@ -32,6 +32,7 @@ import hashlib
 import json
 import logging
 import re
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,7 +43,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .agent import NO_EVIDENCE_PHRASE, get_runtime
+from .agent import (
+    NO_EVIDENCE_ANSWER,
+    NO_EVIDENCE_PHRASE,
+    default_case_sources,
+    get_runtime,
+    prepare_retrieval_queries,
+)
 from .article_store import (
     delete_article as delete_article_row,
     dispose_article_db,
@@ -57,7 +64,7 @@ from .article_store import (
 from .ingest import file_to_text, index_text, ingest_link
 from .config import BASE_DIR, get_catalog, get_settings
 from .hackapi import dataset_info, ensure_dataset_indexed, fetch_dataset
-from .llm import close_http_client, get_llm, provider_info, set_provider
+from .llm import close_http_client, get_llm, guardrail_info, provider_info, set_provider, usage_info
 from .schemas import (
     ArticleAccepted,
     ArticleDetailOut,
@@ -583,9 +590,12 @@ async def health() -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("articles count failed: %s", exc)
         articles_count = 0
+    guardrail_health = guardrail_info()
     return {
-        "status": "ok" if llm_health.get("ok") else "degraded",
+        "status": "ok" if llm_health.get("ok") and not guardrail_health["degraded"] else "degraded",
         "llm": {"model": get_llm().model, "provider": get_llm().provider, **llm_health},
+        "guardrail": guardrail_health,
+        "llm_usage": usage_info(),
         "vector_store": {
             "collection": store.collection_name,
             "chunks": store.count(),
@@ -616,6 +626,29 @@ def _case4_answer(result: Dict[str, Any], record_id: str) -> Dict[str, Any]:
     }
 
 
+def _validate_case4_answers(records: List[Dict[str, Any]], answers: List[Dict[str, Any]]) -> None:
+    expected = [str(record.get("record_id") or record.get("id") or index) for index, record in enumerate(records)]
+    actual = [str(answer.get("record_id")) for answer in answers]
+    if actual != expected:
+        raise HTTPException(status_code=500, detail="case4 answer record_ids do not match requests")
+    for answer in answers:
+        citations = answer.get("citations")
+        valid_citations = isinstance(citations, list) and bool(citations) and all(
+            isinstance(item, dict)
+            and isinstance(item.get("article_id"), str)
+            and bool(item["article_id"])
+            and isinstance(item.get("section_id"), str)
+            and bool(item["section_id"])
+            for item in citations
+        )
+        if not isinstance(answer.get("text"), str) or not answer["text"].strip():
+            raise HTTPException(status_code=500, detail="case4 answer contains empty text")
+        if not isinstance(answer.get("refused"), bool):
+            raise HTTPException(status_code=500, detail="case4 answer contains invalid refused")
+        if not valid_citations:
+            raise HTTPException(status_code=500, detail="case4 answer contains empty or invalid citations")
+
+
 def _authorization_bearer(request: Request) -> str:
     """Токен из заголовка Authorization: Bearer <токен>. Пустой, если не задан."""
     value = request.headers.get("authorization", "")
@@ -634,8 +667,39 @@ def _case_utterance(record: Dict[str, Any]) -> str:
     return str(record.get("question") or record.get("query") or "").strip()
 
 
-@app.post("/run", tags=["case4"])
-async def run_case4(request: Request) -> JSONResponse:
+def _case_chat_history(dataset: Dict[str, Any], record: Dict[str, Any]) -> List[Dict[str, str]]:
+    user_id = str(record.get("user_id") or "")
+    current = (record.get("utterance") or {}).get("at") if isinstance(record.get("utterance"), dict) else None
+
+    def timestamp(value: Any) -> float:
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            return 0.0
+
+    current_ts = timestamp(current)
+    rows = []
+    for item in dataset.get("chat_history") or []:
+        if str(item.get("user_id") or "") != user_id:
+            continue
+        item_ts = timestamp(item.get("at"))
+        if current_ts and item_ts >= current_ts:
+            continue
+        text = str(item.get("text") or "").strip()
+        if text:
+            rows.append((item_ts, item, text))
+    rows.sort(key=lambda value: value[0])
+    limit = max(1, get_settings().history_messages - 1)
+    return [
+        {
+            "role": "assistant" if item.get("role") in {"agent", "assistant"} else "user",
+            "content": text,
+        }
+        for _, item, text in rows[-limit:]
+    ]
+
+
+async def _run_case4_impl(request: Request) -> JSONResponse:
     """Демо-стенд кейса 4.
 
     Стенд шлёт `{"case": 4, "dataset_code": "..."}` с токеном в `Authorization`.
@@ -658,12 +722,17 @@ async def run_case4(request: Request) -> JSONResponse:
 
     # Записи, которые надо обработать. dataset_code есть → источник — набор API/локальной копии.
     records: List[Dict[str, Any]] = []
+    dataset: Dict[str, Any] = {}
     if dataset_code:
         token = _authorization_bearer(request)
-        dataset = await fetch_dataset(token=token or None, dataset_code=dataset_code)
+        allow_local = dataset_code == get_settings().dataset_code
+        dataset = await fetch_dataset(
+            token=token or None, dataset_code=dataset_code, allow_local_fallback=allow_local
+        )
+        if not dataset:
+            raise HTTPException(status_code=502, detail="unable to fetch requested dataset")
         records = [r for r in (dataset or {}).get("requests") or [] if isinstance(r, dict)]
     else:
-        # Локальная отладка: обрабатываем ровно то, что пришло в теле (1 запись = 1 вызов LLM).
         token = _authorization_bearer(request)
         if isinstance(body, list):
             records = [r for r in body if isinstance(r, dict)]
@@ -673,27 +742,65 @@ async def run_case4(request: Request) -> JSONResponse:
     if not records:
         raise HTTPException(status_code=400, detail="no requests in payload")
 
-    # база может быть пустой, если приложение успело ответить на GET / до индексации
-    await ensure_dataset_indexed(token=token or None)
+    if dataset_code:
+        await ensure_dataset_indexed(
+            token=token or None,
+            dataset_code=dataset_code,
+            dataset=dataset,
+            allow_local_fallback=dataset_code == get_settings().dataset_code,
+        )
+    else:
+        await ensure_dataset_indexed(token=token or None)
 
     runtime = get_runtime()
-    answers: List[Dict[str, Any]] = []
+    run_id = uuid.uuid4().hex
+    retrieval_queries = await prepare_retrieval_queries(records)
+    answer_slots: Dict[int, Dict[str, Any]] = {}
+    groups: Dict[tuple[str, str], List[tuple[int, Dict[str, Any]]]] = {}
     for index, record in enumerate(records):
         record_id = str(record.get("record_id") or record.get("id") or index)
         question = _case_utterance(record)
         if not question:
-            answers.append({"record_id": record_id, "text": NO_EVIDENCE_PHRASE, "refused": False, "citations": []})
+            answer_slots[index] = _case4_answer(
+                {"answer": NO_EVIDENCE_ANSWER, "sources": await default_case_sources()}, record_id
+            )
             continue
-        result = await runtime.run(
-            session_id=f"case4-{record_id}",
-            program_id=str(record.get("program_id") or "sleep_recovery"),
-            expert_id=str(record.get("expert_id") or "clinician"),
-            message=question,
-            user_id=record.get("user_id"),
-        )
-        answers.append(_case4_answer(result, record_id))
+        group_id = str(record.get("group_id") or record_id)
+        groups.setdefault((group_id, question), []).append((index, record))
 
+    for (group_id, question), members in groups.items():
+        expert_ids = [str(record.get("expert_id") or "clinician") for _, record in members]
+        first_record = members[0][1]
+        result = await runtime.run_group(
+            session_id=f"case4-{run_id}-group-{group_id}",
+            program_id=str(first_record.get("program_id") or "sleep_recovery"),
+            expert_ids=expert_ids,
+            message=question,
+            user_id=first_record.get("user_id"),
+            retrieval_query=retrieval_queries.get(question),
+            chat_history=_case_chat_history(dataset, first_record),
+        )
+        for index, record in members:
+            record_id = str(record.get("record_id") or record.get("id") or index)
+            expert_id = str(record.get("expert_id") or "clinician")
+            answer_slots[index] = _case4_answer(
+                {**result, "answer": result["answers"][expert_id]}, record_id
+            )
+
+    answers = [answer_slots[index] for index in range(len(records))]
+    _validate_case4_answers(records, answers)
+    logger.info("case4 run complete: records=%d usage=%s", len(records), usage_info())
     return JSONResponse({"requests": answers})
+
+
+@app.post("/run", tags=["case4"])
+async def run_case4(request: Request) -> JSONResponse:
+    try:
+        return await asyncio.wait_for(
+            _run_case4_impl(request), timeout=get_settings().run_timeout_seconds
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="case4 run exceeded internal deadline")
 
 
 # --------------------------------------------------------------------------- #

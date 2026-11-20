@@ -1,12 +1,12 @@
-"""Хранилище документов на чистых Python: BM25 (Okapi) + бонус свежести.
+"""Хранилище документов на чистом Python: BM25 (Okapi).
 
 Замена ChromaDB + ONNX bge-m3 на поиск без внешних моделей и без векторов.
 Подходит под ограничения стенда: офлайн, только табличные вычисления, без весов моделей
 и без скачивания чего-либо в runtime. Пакеты — только стандартная библиотека.
 
 Индекс живой: статьи хранятся в памяти, persist-копия (JSON) в каталоге `persist_dir`.
-Поиск: токенизация запроса → BM25-оценка по всем чанкам → нормализация в 0..1 →
-порог релевантности → бонус свежести → не более N чанков на статью.
+Поиск: токенизация запроса → BM25 по названиям и чанкам → нормализация в 0..1 →
+порог релевантности → не более N чанков на статью. Свежесть не влияет на ранжирование.
 
 Совместимость интерфейса сохранена: `RetrievedChunk.distance = 1 - normalized_score`,
 поэтому логика агента (пороги, отказы, журнал пробелов знаний) не меняется.
@@ -36,6 +36,15 @@ logger = logging.getLogger(__name__)
 _TOKEN_RE = re.compile(r"[^\W\d_]+|\d+", re.UNICODE)
 
 
+def _normalize_token(token: str) -> str:
+    if token.isascii() and token.isalpha():
+        if len(token) > 5 and token.endswith("ies"):
+            return token[:-3] + "y"
+        if len(token) > 4 and token.endswith("s") and not token.endswith("ss"):
+            return token[:-1]
+    return token
+
+
 def tokenize(text: str) -> List[str]:
     """Нижний регистр, вырезаем токены (слова и числа), без пунктуации и стоп-слов."""
     if not text:
@@ -48,7 +57,7 @@ def tokenize(text: str) -> List[str]:
         "the", "and", "of", "to", "in", "a", "is", "that", "it", "was", "for", "on", "with",
         "as", "are", "this", "be", "at", "from", "by", "an", "or", "we", "their", "which",
     }
-    out = [t for t in _TOKEN_RE.findall((text or "").lower()) if t and t not in STOP]
+    out = [_normalize_token(t) for t in _TOKEN_RE.findall((text or "").lower()) if t and t not in STOP]
     return out
 
 
@@ -176,10 +185,15 @@ class _BM25:
     def __init__(self) -> None:
         self._docs: List[List[str]] = []  # токены каждого документа
         self._doc_len: List[int] = []
+        self._df: Dict[str, int] = {}
 
     def build(self, tokenized_docs: Sequence[List[str]]) -> None:
         self._docs = [list(d) for d in tokenized_docs]
         self._doc_len = [len(d) for d in self._docs]
+        self._df = {}
+        for doc in self._docs:
+            for token in set(doc):
+                self._df[token] = self._df.get(token, 0) + 1
 
     def search(self, query_tokens: Sequence[str], k1: float = 1.5, b: float = 0.75) -> List[float]:
         """Возвращает BM25-оценки для каждого документа (0, если нет совпадений)."""
@@ -192,13 +206,9 @@ class _BM25:
         if not query_tokens:
             return scores
 
-        df: Dict[str, int] = {}
-        for doc in self._docs:
-            for token in set(doc):
-                df[token] = df.get(token, 0) + 1
-
         for token in query_tokens:
-            idf = math.log(1 + (N - df.get(token, 0) + 0.5) / (df.get(token, 0) + 0.5))
+            df = self._df.get(token, 0)
+            idf = math.log(1 + (N - df + 0.5) / (df + 0.5))
             if idf <= 0:
                 continue
             for i, doc in enumerate(self._docs):
@@ -248,7 +258,13 @@ class VectorStore:
         self._rebuild_index()
 
     def _rebuild_index(self) -> None:
-        self._bm25.build([tokenize(c.get("document", "")) for c in self._chunks])
+        searchable = []
+        for chunk in self._chunks:
+            metadata = chunk.get("metadata") or {}
+            title = str(metadata.get("section_title") or "")
+            article_title = str(metadata.get("title") or "")
+            searchable.append(tokenize(f"{title} {title} {article_title} {chunk.get('document', '')}"))
+        self._bm25.build(searchable)
 
     # ---- basics ----------------------------------------------------------- #
     def count(self) -> int:
@@ -330,7 +346,7 @@ class VectorStore:
         top_k: int | None = None,
         min_similarity: float | None = None,
     ) -> List[RetrievedChunk]:
-        """BM25-поиск + порог + бонус свежести; всё ниже порога отбрасывается."""
+        """BM25-поиск с порогом релевантности; всё ниже порога отбрасывается."""
         settings = get_settings()
         k = top_k or settings.retrieval_top_k
         threshold = settings.retrieval_min_similarity if min_similarity is None else min_similarity
@@ -345,7 +361,6 @@ class VectorStore:
             if program_id is None or (c.get("metadata") or {}).get("program_id") == program_id
         ]
         max_score = max((scores[i] for i in candidate_idx), default=0.0)
-        now = time.time()
         scored: List[Tuple[float, RetrievedChunk]] = []
         for i in candidate_idx:
             score = scores[i]
@@ -359,9 +374,7 @@ class VectorStore:
             similarity = 1.0 - chunk.distance
             if similarity < threshold:
                 continue
-            age_days = (now - chunk.added_at) / 86400 if chunk.added_at else 365.0
-            bonus = 0.25 if age_days <= settings.freshness_days else 0.05 if age_days <= 30 else 0.0
-            scored.append((similarity + bonus, chunk))
+            scored.append((similarity, chunk))
         scored.sort(key=lambda item: item[0], reverse=True)
 
         result: List[RetrievedChunk] = []

@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 _cache: Dict[str, Any] = {"data": None, "at": 0.0, "source": ""}
 _lock = asyncio.Lock()
+_indexed_dataset_key: Optional[str] = None
 
 
 def local_dataset() -> Dict[str, Any]:
@@ -33,8 +34,10 @@ def local_dataset() -> Dict[str, Any]:
     return raw.get("dataset", raw)
 
 
-async def fetch_dataset(*, token: Optional[str] = None, dataset_code: Optional[str] = None) -> Dict[str, Any]:
-    """Возвращает набор кейса 4: сначала кеш, затем API хакатона, затем локальный файл.
+async def fetch_dataset(
+    *, token: Optional[str] = None, dataset_code: Optional[str] = None, allow_local_fallback: bool = True
+) -> Dict[str, Any]:
+    """Возвращает набор кейса 4; локальный fallback разрешён только для разработки.
 
     `token` — токен из заголовка Authorization (так стенд присылает токен проверки);
     если не передан, используется HACK_TEAM_TOKEN из окружения.
@@ -53,14 +56,14 @@ async def fetch_dataset(*, token: Optional[str] = None, dataset_code: Optional[s
 
         data = await _fetch_remote(token=token, dataset_code=cache_key)
         source = "api"
-        if not data:
+        if not data and allow_local_fallback:
             data = local_dataset()
             source = "local"
         if data:
             _cache.update({"data": data, "at": time.time(), "source": source, "key": cache_key})
             logger.info("case4 dataset ready: source=%s articles=%d requests=%d",
                         source, len(data.get("articles") or []), len(data.get("requests") or []))
-        return data
+        return data or {}
 
 
 async def _fetch_remote(*, token: Optional[str], dataset_code: str) -> Optional[Dict[str, Any]]:
@@ -83,26 +86,34 @@ async def _fetch_remote(*, token: Optional[str], dataset_code: str) -> Optional[
         return None
 
 
-async def ensure_dataset_indexed(*, token: Optional[str] = None) -> int:
-    """Индексирует статьи набора kейса 4 в BM25, если база ещё пуста.
-
-    Вызывается при старте приложения. Читает набор один раз — сначала API (если токен задан),
-    иначе локальный `data/case4-dev.json` — и заливает статьи в поисковый слой.
-    Возвращает число проиндексированных статей; 0 — если набора нет или он уже был загружен.
-    """
+async def ensure_dataset_indexed(
+    *,
+    token: Optional[str] = None,
+    dataset_code: Optional[str] = None,
+    dataset: Optional[Dict[str, Any]] = None,
+    allow_local_fallback: bool = True,
+) -> int:
+    """Индексирует именно выданный набор и атомарно заменяет индекс при смене dataset_id."""
     from .config import get_catalog
     from .vectorstore import add_article_async, get_store
 
-    store = get_store()
-    if store.count() > 0:
-        return 0
-
-    dataset = await fetch_dataset(token=token, dataset_code=None)
-    if not dataset:
-        dataset = local_dataset()
+    global _indexed_dataset_key
+    settings = get_settings()
+    if dataset is None:
+        dataset = await fetch_dataset(
+            token=token, dataset_code=dataset_code, allow_local_fallback=allow_local_fallback
+        )
     if not dataset:
         logger.warning("no dataset available for indexing (case4)")
         return 0
+
+    code = dataset_code or settings.dataset_code
+    dataset_key = str((dataset.get("meta") or {}).get("dataset_id") or code)
+    store = get_store()
+    if store.count() > 0 and _indexed_dataset_key == dataset_key:
+        return 0
+    if store.count() > 0:
+        await asyncio.to_thread(store.reset)
 
     articles = dataset.get("articles") or []
     if not articles:
@@ -144,6 +155,8 @@ async def ensure_dataset_indexed(*, token: Optional[str] = None) -> int:
             indexed += 1
         except Exception as exc:  # noqa: BLE001 — одна статья не должна ронять старт
             logger.warning("auto-index failed for article %s: %s", article.get("article_id"), exc)
+    if indexed:
+        _indexed_dataset_key = dataset_key
     logger.info("case4 auto-indexed %d articles (%d chunks)", indexed, store.count())
     return indexed
 

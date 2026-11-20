@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 1200
     llm_request_timeout: float = 60.0
     llm_max_retries: int = 2
+    llm_min_request_interval: float = 2.0
+    run_timeout_seconds: float = 2400.0
     history_messages: int = 8
 
     @property
@@ -59,8 +61,8 @@ class Settings(BaseSettings):
     chroma_collection: str = "scientific_articles"
     chunk_size: int = 500
     chunk_overlap: int = 100
-    retrieval_top_k: int = 3
-    retrieval_top_k_multi: int = 6  # мульти-режим: больше контекста, чтобы ответы различались
+    retrieval_top_k: int = 3  # минимальный пул кандидатов; в ответ попадает один лучший раздел
+    retrieval_top_k_multi: int = 6  # пул кандидатов для общего поиска тройки
     retrieval_min_similarity: float = 0.15  # ниже порога — «в базе нет подтверждённых исследований»
 
     # --- хранилища: SQLite по умолчанию, PostgreSQL при заданном DATABASE_URL ---
