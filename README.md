@@ -82,7 +82,7 @@ bash start.sh
 
 На вход принимает `{"case":4,"dataset_code":"..."}` с Bearer-токеном проверки, получает именно этот набор через `getData` и не подменяет скрытый набор локальным dev. Индекс пересобирается при смене `dataset_id`; учитывается более ранняя `chat_history` того же пользователя как недоверенный контекст.
 
-Записи группируются по `group_id`: retrieval и guardrail общие, а один structured JSON-вызов возвращает тексты всех экспертов с общими verdict/citations. LLM-запросы ограничены интервалом 2 секунды (не более 30/минуту), внутренний deadline `/run` — 40 минут. `/health` показывает `llm_usage`; в конце проверяются все record_id, непустой текст, boolean `refused` и существующие непустые citations. Ответ совпадает по формату с `/case/4/validate` — `backend/main.py`, `backend/agent.py`, `backend/hackapi.py`.
+Записи группируются по `group_id`: retrieval и guardrail общие, а один structured JSON-вызов возвращает тексты всех экспертов с общими verdict/citations. LLM-запросы ограничены интервалом 2 секунды (не более 30/минуту), внутренний deadline `/run` — 40 минут. `/health` показывает `llm_usage`; в конце проверяются все record_id, непустой текст, boolean `refused` и структура citations. При `no_evidence` не подставляется нерелевантный общий источник: такая запись может не засчитываться отдельно, но не обнуляет остальные ответы `/run`. Ответ совпадает по формату с `/case/4/validate` — `backend/main.py`, `backend/agent.py`, `backend/hackapi.py`.
 
 Полная dev-проверка настоящего контракта и формата (нужен токен организаторов):
 

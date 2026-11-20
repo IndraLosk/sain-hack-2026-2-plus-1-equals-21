@@ -214,20 +214,6 @@ def _docs_to_state(docs: List[RetrievedChunk]) -> List[Dict[str, Any]]:
     ]
 
 
-async def _ensure_citation_docs(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if docs:
-        return docs
-    fallback = await search_async(
-        "sleep hygiene limitations self care", program_id=None, top_k=1, min_similarity=0.0
-    )
-    return _docs_to_state(fallback)
-
-
-async def default_case_sources() -> List[Dict[str, Any]]:
-    docs = await _ensure_citation_docs([])
-    return [source.model_dump() for source in sources_from_docs(docs)]
-
-
 def _facts_block(docs: List[Dict[str, Any]]) -> str:
     if not docs:
         return "(пусто — в базе нет релевантных фрагментов)"
@@ -601,8 +587,11 @@ async def guardrail_node(state: AgentState) -> Dict[str, Any]:
     if preset:
         result = GuardrailResult.model_validate(preset)
     else:
+        history = _history_messages(state.get("messages") or [])
+        if history and history[-1]["role"] == "user" and history[-1]["content"] == question:
+            history = history[:-1]
         try:
-            result = await llm_guardrail(question)
+            result = await llm_guardrail(question, history=history)
         except Exception as exc:  # noqa: BLE001
             logger.warning("guardrail failed, fallback to heuristic: %s", exc)
             result = heuristic_guardrail(question)
@@ -829,7 +818,6 @@ class AgentRuntime:
             config=self._config(session_id),
         )
         answer = await self._generate_answer(state)
-        state["retrieved_docs"] = await _ensure_citation_docs(state.get("retrieved_docs") or [])
         await _remember_used_chunks(
             state.get("retrieved_docs") or [], query=message, session_id=session_id, expert_id=expert_id
         )
@@ -918,8 +906,7 @@ class AgentRuntime:
             config=self._config(session_id),
         )
         answers = await self._generate_group_answers(state, expert_ids)
-        docs = await _ensure_citation_docs(state.get("retrieved_docs") or [])
-        state["retrieved_docs"] = docs
+        docs = state.get("retrieved_docs") or []
         await _remember_used_chunks(
             docs, query=message, session_id=session_id, expert_id=",".join(expert_ids)
         )
@@ -951,8 +938,6 @@ class AgentRuntime:
         category = str((state.get("guardrail") or {}).get("category") or "none")
         docs = state.get("retrieved_docs") or []
         no_evidence = not docs and not unsafe
-        docs = await _ensure_citation_docs(docs)
-        state["retrieved_docs"] = docs
         sources = sources_from_docs(docs)
         await _remember_used_chunks(docs, query=message, session_id=session_id, expert_id=expert_id)
 
@@ -1037,8 +1022,6 @@ class AgentRuntime:
         category = str((base_state.get("guardrail") or {}).get("category") or "none")
         docs = base_state.get("retrieved_docs") or []
         no_evidence = not docs and not unsafe
-        docs = await _ensure_citation_docs(docs)
-        base_state["retrieved_docs"] = docs
         sources = sources_from_docs(docs)
         await _remember_used_chunks(docs, query=message, session_id=session_id, expert_id=",".join(expert_ids))
 
@@ -1320,24 +1303,27 @@ _REFUSAL_FALLBACK = {
 }
 
 
-def _safe_step_from_docs(docs: List[Dict[str, Any]]) -> str:
-    topic = " ".join(str(doc.get("title") or "") + " " + str(doc.get("section_title") or "") for doc in docs).lower()
-    if "smartphone" in topic or "screen" in topic:
-        return "Уберите смартфон за час до сна и отметьте, как изменилось засыпание."
-    if "light" in topic:
-        return "Уменьшите вечерний свет и проследите за временем засыпания."
-    if "heat" in topic or "temperature" in topic:
-        return "Проветрите спальню и уменьшите перегрев перед сном."
-    if "exercise" in topic:
-        return "Не меняйте нагрузку резко и отметьте индивидуальную реакцию сна."
-    if "caffeine" in topic:
-        return "Перенесите последний кофе на более раннее время и проследите за сном."
-    if "alcohol" in topic:
-        return "Не используйте алкоголь как способ уснуть и отметьте ночные пробуждения."
-    if "regularity" in topic:
-        return "Выберите более стабильное время сна и подъёма без обещания одинакового эффекта всем."
-    return "Зафиксируйте режим сна, а стойкие симптомы обсудите при очной оценке."
+_SECTION_SAFE_STEPS = {
+    ("art_14", "s013"): "Уменьшите вечерний свет и проследите за временем засыпания.",
+    ("art_05", "s038"): "Уберите смартфон за час до сна и отметьте, как изменилось засыпание.",
+    ("art_16", "s009"): "Проветрите спальню и уменьшите перегрев перед сном.",
+    ("art_16", "s010"): "Проветрите спальню и уменьшите перегрев и духоту перед сном.",
+    ("art_02", "s030"): "Не используйте алкоголь как способ уснуть и отметьте ночные пробуждения.",
+    ("art_07", "s014"): "Используйте только подтверждённые меры гигиены сна; стойкие симптомы обсудите очно.",
+    ("art_13", "s025"): "Выберите более стабильные окна сна и подъёма без оценки личного риска.",
+    ("art_20", "s007"): "Перенесите последний кофе на более раннее время и проследите за сном.",
+    ("art_03", "s020"): "Не прекращайте активность резко и отметьте индивидуальную реакцию сна.",
+    ("art_08", "s001"): "Сохраняйте посильную регулярную активность без обещания результата.",
+}
+_GENERIC_SAFE_STEP = "Не меняйте лечение самостоятельно; стойкие симптомы обсудите при очной оценке."
 
+
+def _safe_step_from_docs(docs: List[Dict[str, Any]]) -> str:
+    for doc in docs:
+        key = (str(doc.get("article_id") or ""), str(doc.get("section_id") or ""))
+        if key in _SECTION_SAFE_STEPS:
+            return _SECTION_SAFE_STEPS[key]
+    return _GENERIC_SAFE_STEP
 
 def _fallback_answer(docs: List[Dict[str, Any]], unsafe: bool, category: str = "none") -> str:
     """Безопасный ответ без LLM без английских сниппетов и обрыва JSON."""
@@ -1347,11 +1333,7 @@ def _fallback_answer(docs: List[Dict[str, Any]], unsafe: bool, category: str = "
     if not docs:
         if unsafe:
             return f"{prefix} Подходящего источника в базе не найдено; безопасный шаг — очная оценка при стойких симптомах."
-        return (
-            f"{LLM_FAILED_PHRASE} {NO_EVIDENCE_PHRASE}. "
-            "Безопасный шаг: зафиксируйте время подъёма на 7 дней и выходите на 10 минут "
-            "яркого света сразу после пробуждения."
-        )
+        return f"{LLM_FAILED_PHRASE} {NO_EVIDENCE_ANSWER}"
 
     titles: List[str] = []
     for doc in docs[:3]:
@@ -1389,7 +1371,6 @@ __all__ = [
     "used_chunks_from_docs",
     "extract_user_facts",
     "prepare_retrieval_queries",
-    "default_case_sources",
     "STYLE_VARIANTS",
     "NO_EVIDENCE_PHRASE",
     "NO_EVIDENCE_ANSWER",

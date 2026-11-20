@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException, Request
 
 from backend import hackapi
-from backend.agent import AgentRuntime, default_case_sources
+from backend.agent import AgentRuntime
 from backend.config import get_settings
 from backend.llm import OpenAICompatLLM, get_llm
 from backend.main import _case_chat_history, _validate_case4_answers, run_case4
@@ -146,18 +146,19 @@ def test_case_chat_history_filters_user_time_and_roles() -> None:
     ]
 
 
-@pytest.mark.asyncio
-async def test_default_citations_and_final_format_validation(monkeypatch) -> None:
-    async def fake_search(*args: Any, **kwargs: Any) -> list[RetrievedChunk]:
-        return [_doc("art_07", "s014")]
-
-    monkeypatch.setattr("backend.agent.search_async", fake_search)
-    sources = await default_case_sources()
-    assert sources[0]["article_id"] == "art_07"
-    records = [{"record_id": "r1"}]
-    answers = [{"record_id": "r1", "text": "Ответ", "refused": False, "citations": [{"article_id": "art_07", "section_id": "s014"}]}]
+def test_no_evidence_does_not_invalidate_other_records() -> None:
+    records = [{"record_id": "r1"}, {"record_id": "r2"}]
+    answers = [
+        {"record_id": "r1", "text": "В базе нет подтверждений", "refused": False, "citations": []},
+        {
+            "record_id": "r2",
+            "text": "Ответ",
+            "refused": False,
+            "citations": [{"article_id": "art_07", "section_id": "s014"}],
+        },
+    ]
     _validate_case4_answers(records, answers)
-    answers[0]["citations"] = []
+    answers[0]["citations"] = [{"article_id": "", "section_id": "s014"}]
     with pytest.raises(HTTPException, match="citations"):
         _validate_case4_answers(records, answers)
 

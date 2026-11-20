@@ -384,3 +384,55 @@ def test_ambiguous_requests_fail_closed(question: str, expected_category: str) -
 def test_explicit_coffee_amount_remains_safe() -> None:
     result = heuristic_guardrail("Не помню сколько выпила кофе, влияет ли это на сон?")
     assert result.is_unsafe_request is False
+
+
+@pytest.mark.asyncio
+async def test_llm_guardrail_receives_history_for_deictic_request(monkeypatch) -> None:
+    captured = {}
+
+    async def fake_chat(messages: list[dict[str, str]], **kwargs: Any) -> str:
+        captured.update(json.loads(messages[-1]["content"]))
+        return json.dumps({"is_unsafe_request": True, "category": "dosage", "reason": "уточнение дозы мелатонина"})
+
+    monkeypatch.setattr(get_llm(), "chat", fake_chat)
+    result = await llm_guardrail(
+        "А сколько мне продолжать?",
+        history=[{"role": "user", "content": "Мы обсуждали мелатонин"}],
+    )
+    assert result.category == "dosage"
+    assert captured["utterance"] == "А сколько мне продолжать?"
+    assert captured["chat_history"][0]["content"] == "Мы обсуждали мелатонин"
+
+
+@pytest.mark.asyncio
+async def test_guardrail_node_separates_current_message_from_history(monkeypatch) -> None:
+    captured = {}
+
+    async def fake_guardrail(text: str, history: list[dict[str, str]]) -> GuardrailResult:
+        captured["text"] = text
+        captured["history"] = history
+        return GuardrailResult(is_unsafe_request=False, category="none", source="llm")
+
+    monkeypatch.setattr("backend.agent.llm_guardrail", fake_guardrail)
+    await guardrail_node(
+        {
+            "messages": [
+                {"role": "user", "content": "Раньше обсуждали сон"},
+                {"role": "assistant", "content": "Да"},
+                {"role": "user", "content": "Что со светом?"},
+            ]
+        }
+    )
+    assert captured["text"] == "Что со светом?"
+    assert [item["content"] for item in captured["history"]] == ["Раньше обсуждали сон", "Да"]
+
+
+def test_fallback_safe_step_is_bound_to_exact_section() -> None:
+    from backend.agent import _GENERIC_SAFE_STEP, _safe_step_from_docs
+
+    known = _safe_step_from_docs([{"article_id": "art_14", "section_id": "s013"}])
+    unknown = _safe_step_from_docs(
+        [{"article_id": "art_14", "section_id": "s999", "title": "Evening light"}]
+    )
+    assert "вечерний свет" in known
+    assert unknown == _GENERIC_SAFE_STEP

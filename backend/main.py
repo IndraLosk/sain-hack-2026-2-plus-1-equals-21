@@ -43,13 +43,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .agent import (
-    NO_EVIDENCE_ANSWER,
-    NO_EVIDENCE_PHRASE,
-    default_case_sources,
-    get_runtime,
-    prepare_retrieval_queries,
-)
+from .agent import NO_EVIDENCE_ANSWER, NO_EVIDENCE_PHRASE, get_runtime, prepare_retrieval_queries
 from .article_store import (
     delete_article as delete_article_row,
     dispose_article_db,
@@ -633,7 +627,7 @@ def _validate_case4_answers(records: List[Dict[str, Any]], answers: List[Dict[st
         raise HTTPException(status_code=500, detail="case4 answer record_ids do not match requests")
     for answer in answers:
         citations = answer.get("citations")
-        valid_citations = isinstance(citations, list) and bool(citations) and all(
+        valid_citations = isinstance(citations, list) and all(
             isinstance(item, dict)
             and isinstance(item.get("article_id"), str)
             and bool(item["article_id"])
@@ -646,7 +640,7 @@ def _validate_case4_answers(records: List[Dict[str, Any]], answers: List[Dict[st
         if not isinstance(answer.get("refused"), bool):
             raise HTTPException(status_code=500, detail="case4 answer contains invalid refused")
         if not valid_citations:
-            raise HTTPException(status_code=500, detail="case4 answer contains empty or invalid citations")
+            raise HTTPException(status_code=500, detail="case4 answer contains malformed citations")
 
 
 def _authorization_bearer(request: Request) -> str:
@@ -761,9 +755,9 @@ async def _run_case4_impl(request: Request) -> JSONResponse:
         record_id = str(record.get("record_id") or record.get("id") or index)
         question = _case_utterance(record)
         if not question:
-            answer_slots[index] = _case4_answer(
-                {"answer": NO_EVIDENCE_ANSWER, "sources": await default_case_sources()}, record_id
-            )
+            answer_slots[index] = {
+                "record_id": record_id, "text": NO_EVIDENCE_ANSWER, "refused": False, "citations": []
+            }
             continue
         group_id = str(record.get("group_id") or record_id)
         groups.setdefault((group_id, question), []).append((index, record))
